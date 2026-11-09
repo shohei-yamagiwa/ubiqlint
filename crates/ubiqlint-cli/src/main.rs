@@ -94,6 +94,18 @@ impl Reporter {
         self.line(text);
     }
 
+    /// Formats all parser and checker diagnostics consistently.
+    fn diagnostics(&mut self, path: &Path, diagnostics: &[Diagnostic]) {
+        for diagnostic in diagnostics {
+            self.problem(&format!(
+                "{}:{}: error: {}",
+                path.display(),
+                diagnostic.location,
+                single_line(&diagnostic.message)
+            ));
+        }
+    }
+
     /// Prints a warning to stderr. Warnings never fail the run and do not
     /// mix into the `path:line:column: error:` lines on stdout.
     fn warn(&mut self, text: &str) {
@@ -165,9 +177,9 @@ fn check(reporter: &mut Reporter, config_path: &Path, dictionary: Option<&Path>)
     };
 
     let checker = Checker::new(&dictionary, &config);
-    let excludes = config.excludes().clone();
+    let excludes = config.excludes();
     let mut checked = 0;
-    for relative in collect_files(reporter, read_root, root, &excludes) {
+    for relative in collect_files(reporter, read_root, root, excludes) {
         if reporter.broken() {
             break;
         }
@@ -178,34 +190,15 @@ fn check(reporter: &mut Reporter, config_path: &Path, dictionary: Option<&Path>)
             continue;
         };
         checked += 1;
-        let shown = root.join(&relative).display().to_string();
-        let source = match fs::read_to_string(read_root.join(&relative)) {
-            Ok(source) => source,
-            Err(error) => {
-                reporter.problem(&format!("{shown}: error: cannot read the file: {error}"));
-                continue;
-            }
+        let path = root.join(&relative);
+        let Some(source) = read_source(reporter, &path) else {
+            continue;
         };
-        match adapter.extract(&source) {
-            Err(errors) => {
-                for error in &errors {
-                    reporter.problem(&format!(
-                        "{shown}:{}: error: {}",
-                        error.location,
-                        single_line(&error.message)
-                    ));
-                }
-            }
-            Ok(symbols) => {
-                for diagnostic in checker.check(&symbols, &relative) {
-                    reporter.problem(&format!(
-                        "{shown}:{}: error: {}",
-                        diagnostic.location,
-                        single_line(&diagnostic.message)
-                    ));
-                }
-            }
-        }
+        let diagnostics = match adapter.extract(&source) {
+            Ok(symbols) => checker.check(&symbols, &relative),
+            Err(diagnostics) => diagnostics,
+        };
+        reporter.diagnostics(&path, &diagnostics);
     }
     if checked == 0 {
         // Distinguish "no violations" from "nothing was checked", which CI
@@ -352,27 +345,26 @@ fn load<T>(
     path: &Path,
     parse: fn(&str) -> Result<T, Vec<Diagnostic>>,
 ) -> Option<T> {
-    let shown = path.display();
-    let source = match fs::read_to_string(path) {
-        Ok(source) => source,
-        Err(error) => {
-            reporter.problem(&format!("{shown}: error: cannot read the file: {error}"));
-            return None;
-        }
-    };
+    let source = read_source(reporter, path)?;
     match parse(&source) {
         Ok(value) => Some(value),
         Err(diagnostics) => {
-            for diagnostic in &diagnostics {
-                reporter.problem(&format!(
-                    "{shown}:{}: error: {}",
-                    diagnostic.location,
-                    single_line(&diagnostic.message)
-                ));
-            }
+            reporter.diagnostics(path, &diagnostics);
             None
         }
     }
+}
+
+/// Reads input files using the same error format for definitions and source code.
+fn read_source(reporter: &mut Reporter, path: &Path) -> Option<String> {
+    fs::read_to_string(path)
+        .map_err(|error| {
+            reporter.problem(&format!(
+                "{}: error: cannot read the file: {error}",
+                path.display()
+            ));
+        })
+        .ok()
 }
 
 /// Escapes control characters other than tabs, so that each problem stays on

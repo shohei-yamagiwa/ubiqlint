@@ -7,31 +7,29 @@
 //! of the innermost enclosing type, and may then only use a form of one of
 //! that term's defined behaviors.
 
-use std::collections::{HashMap, HashSet};
-use std::ops::Range;
 use std::path::Path;
 
-use crate::config::{Config, Rule, Vocabulary};
+use crate::config::{Config, Rule};
 use crate::diagnostic::Diagnostic;
 use crate::dictionary::{DICTIONARY_FILE_NAME, Dictionary};
 use crate::identifier;
+use crate::matching::{MatchMode, Matcher};
 use crate::pattern::{Element, NounForm, Pattern, VerbForm};
-use crate::symbol::{Name, Symbol, SymbolKind, Symbols};
-use crate::words::Words;
+use crate::symbol::{Name, SymbolKind, Symbols};
 
 /// Checks symbols against rules, using one dictionary and one configuration.
 pub struct Checker<'a> {
     dictionary: &'a Dictionary,
     config: &'a Config,
-    vocabularies: HashMap<&'a str, &'a Vocabulary>,
-    /// The term each noun form belongs to, by form. Dictionary validation
-    /// keeps the forms unique, so one map per form is enough.
-    singular: HashMap<Vec<String>, usize>,
-    plural: HashMap<Vec<String>, usize>,
-    /// Every form of every behavior of every term, as word sequences. In
-    /// relaxed matching a `{verb}` may only take one of these beyond a
-    /// single word.
-    verb_forms: HashSet<Vec<String>>,
+    matcher: Matcher<'a>,
+}
+
+/// Prepared once per symbol and shared by all its applicable rules.
+struct Identifier<'a> {
+    name: &'a Name,
+    words: Vec<String>,
+    enclosing_type: Option<&'a str>,
+    enclosing_term: Option<usize>,
 }
 
 /// Returns the placeholder a verb form is written as, such as `{verb:pp}`.
@@ -43,47 +41,13 @@ fn verb_placeholder(form: VerbForm) -> String {
     }
 }
 
-/// What a placeholder of a pattern matched.
-enum Binding {
-    /// A `{noun}` element and the term its words belong to.
-    Noun { term: usize },
-    /// A `{verb}` element, its form and the words it matched.
-    Verb { form: VerbForm, span: Range<usize> },
-}
-
 impl<'a> Checker<'a> {
     /// Creates a checker for `dictionary` and `config`.
     pub fn new(dictionary: &'a Dictionary, config: &'a Config) -> Self {
-        let vocabularies = config
-            .vocabularies
-            .iter()
-            .map(|vocabulary| (vocabulary.name.as_str(), vocabulary))
-            .collect();
-        let mut singular = HashMap::new();
-        let mut plural = HashMap::new();
-        for (index, term) in dictionary.terms.iter().enumerate() {
-            singular
-                .entry(term.forms.singular.as_slice().to_vec())
-                .or_insert(index);
-            plural
-                .entry(term.forms.plural.as_slice().to_vec())
-                .or_insert(index);
-        }
-        let mut verb_forms = HashSet::new();
-        for term in &dictionary.terms {
-            for behavior in &term.behaviors {
-                for form in VerbForm::ALL {
-                    verb_forms.insert(behavior.forms.get(form).as_slice().to_vec());
-                }
-            }
-        }
         Self {
             dictionary,
             config,
-            vocabularies,
-            singular,
-            plural,
-            verb_forms,
+            matcher: Matcher::new(dictionary, config),
         }
     }
 
@@ -108,21 +72,36 @@ impl<'a> Checker<'a> {
             let Some(name) = &symbol.name else {
                 continue;
             };
-            let rules: Vec<&&Rule> = applicable
+            let mut rules = applicable
                 .iter()
                 .filter(|rule| rule.target.matches(symbol.kind))
-                .collect();
-            if rules.is_empty() {
+                .peekable();
+            if rules.peek().is_none() {
                 continue;
             }
-            // Split the identifier and find the enclosing term once per
-            // symbol, not once per rule.
-            let words = identifier::split(&name.text);
-            let enclosing = self.enclosing_term(symbols, symbol);
+            // Anonymous classes are skipped, but an unknown named type
+            // must not fall back to an outer type's term.
+            let enclosing_type = symbols.ancestors(symbol).find_map(|ancestor| {
+                ancestor
+                    .name
+                    .as_ref()
+                    .filter(|_| ancestor.kind == SymbolKind::Type)
+                    .map(|name| name.text.as_str())
+            });
+            let enclosing_term = enclosing_type.and_then(|name| {
+                let words = identifier::split(name);
+                self.matcher
+                    .term_for_form(NounForm::Singular, &words)
+                    .or_else(|| self.matcher.term_for_form(NounForm::Plural, &words))
+            });
+            let identifier = Identifier {
+                name,
+                words: identifier::split(&name.text),
+                enclosing_type,
+                enclosing_term,
+            };
             for rule in rules {
-                if let Some(diagnostic) =
-                    self.check_symbol(symbols, symbol, name, rule, &words, enclosing)
-                {
+                if let Some(diagnostic) = self.check_symbol(&identifier, rule) {
                     diagnostics.push(diagnostic);
                 }
             }
@@ -133,328 +112,98 @@ impl<'a> Checker<'a> {
 
     /// Checks one symbol against one rule, returning the violation if the
     /// identifier matches none of the rule's patterns.
-    fn check_symbol(
-        &self,
-        symbols: &Symbols,
-        symbol: &Symbol,
-        name: &Name,
-        rule: &Rule,
-        words: &[String],
-        enclosing: Option<usize>,
-    ) -> Option<Diagnostic> {
-        if words.is_empty() {
-            // No pattern can match an identifier without words, and it can
-            // never become a term, so say so instead of listing patterns.
-            return Some(Diagnostic {
-                location: name.span.start,
-                message: format!(
-                    "`{}` contains no words, so it cannot match any pattern of rule `{}`",
-                    name.text, rule.id
-                ),
-            });
-        }
-        for pattern in &rule.patterns {
-            if self.attempt(pattern, words, enclosing, false).is_some() {
+    fn check_symbol(&self, identifier: &Identifier, rule: &Rule) -> Option<Diagnostic> {
+        let message = if identifier.words.is_empty() {
+            // An identifier without words cannot match or become a term.
+            format!(
+                "`{}` contains no words, so it cannot match any pattern of rule `{}`",
+                identifier.name.text, rule.id
+            )
+        } else {
+            if rule.patterns.iter().any(|pattern| {
+                self.matcher
+                    .attempt(
+                        pattern,
+                        &identifier.words,
+                        identifier.enclosing_term,
+                        MatchMode::Strict,
+                    )
+                    .is_some()
+            }) {
                 return None;
             }
-        }
-        Some(self.describe(symbols, symbol, name, rule, words, enclosing))
-    }
-
-    /// Builds the violation for an identifier that matched no pattern,
-    /// describing the nearest one: the pattern that matches once the verb
-    /// checks are relaxed, with the fewest verb words, so that `updateOrder`
-    /// is described against `{verb}{noun}` and not against `{verb}`.
-    fn describe(
-        &self,
-        symbols: &Symbols,
-        symbol: &Symbol,
-        name: &Name,
-        rule: &Rule,
-        words: &[String],
-        enclosing: Option<usize>,
-    ) -> Diagnostic {
-        let mut nearest: Option<(&Pattern, Vec<Binding>, usize)> = None;
-        for pattern in &rule.patterns {
-            if let Some(bindings) = self.attempt(pattern, words, enclosing, true) {
-                let verb_words = bindings
-                    .iter()
-                    .map(|binding| match binding {
-                        Binding::Verb { span, .. } => span.len(),
-                        Binding::Noun { .. } => 0,
-                    })
-                    .sum();
-                if nearest
-                    .as_ref()
-                    .is_none_or(|&(_, _, best)| verb_words < best)
-                {
-                    nearest = Some((pattern, bindings, verb_words));
-                }
-            }
-        }
-        let message = match nearest {
-            Some((pattern, bindings, _)) => {
-                let term = self.bound_term(&bindings, enclosing);
-                let failing_verb = term.and_then(|term| {
-                    bindings.iter().find_map(|binding| match binding {
-                        Binding::Verb { form, span } => {
-                            (!self.term_allows(term, *form, &words[span.clone()]))
-                                .then(|| (*form, span.clone()))
-                        }
-                        Binding::Noun { .. } => None,
-                    })
-                });
-                match (term, failing_verb) {
-                    (Some(term), Some((form, span))) => {
-                        let verb_words = &words[span.clone()];
-                        let verb = verb_words.join(" ");
-                        let term_name = &self.dictionary.terms[term].name;
-                        if let Some(expected) = self.term_behavior_form(term, verb_words, form) {
-                            // The words are a defined behavior in another form,
-                            // so say which form this pattern expects instead.
-                            format!(
-                                "`{}` does not match pattern `{}` of rule `{}`: `{verb}` is a \
-                                 defined behavior of `{term_name}` in a different form, but `{}` \
-                                 expects `{expected}`",
-                                name.text,
-                                pattern.source(),
-                                rule.id,
-                                verb_placeholder(form),
-                            )
-                        } else {
-                            format!(
-                                "`{}` does not match pattern `{}` of rule `{}`: `{verb}` is not \
-                                 a defined behavior of `{term_name}` ({})",
-                                name.text,
-                                pattern.source(),
-                                rule.id,
-                                self.defined_behaviors(term),
-                            )
-                        }
-                    }
-                    (None, _) if bindings.iter().any(|b| matches!(b, Binding::Verb { .. })) => {
-                        match self.enclosing_type_name(symbols, symbol) {
-                            Some(enclosing_type) => format!(
-                                "`{}` does not match pattern `{}` of rule `{}`: `{{verb}}` is \
-                                 not bound to a term: the enclosing type `{enclosing_type}` is \
-                                 not in the dictionary",
-                                name.text,
-                                pattern.source(),
-                                rule.id,
-                            ),
-                            None => format!(
-                                "`{}` does not match pattern `{}` of rule `{}`: `{{verb}}` is \
-                                 not bound to a term: the identifier contains no `{{noun}}` and \
-                                 there is no enclosing type",
-                                name.text,
-                                pattern.source(),
-                                rule.id,
-                            ),
-                        }
-                    }
-                    _ => self.no_pattern_message(name, rule),
-                }
-            }
-            None => self.no_pattern_message(name, rule),
+            self.describe(identifier, rule)
         };
-        Diagnostic {
-            location: name.span.start,
+        Some(Diagnostic {
+            location: identifier.name.span.start,
             message,
-        }
-    }
-
-    /// Tries to match `words` against `pattern`. When `relax_verbs` is set,
-    /// `{verb}` elements match any words without being checked against the
-    /// dictionary, so that the nearest pattern can be described. Returns the
-    /// bindings of the first match.
-    fn attempt(
-        &self,
-        pattern: &Pattern,
-        words: &[String],
-        enclosing: Option<usize>,
-        relax_verbs: bool,
-    ) -> Option<Vec<Binding>> {
-        let mut bindings = Vec::new();
-        if self.match_elements(
-            pattern.elements(),
-            words,
-            0,
-            enclosing,
-            relax_verbs,
-            &mut bindings,
-        ) {
-            Some(bindings)
-        } else {
-            None
-        }
-    }
-
-    /// Matches `elements` against `words` from `pos` on. Variable-length
-    /// elements try every length, since a `{noun}` such as `line item` spans
-    /// several words, and backtrack on failure.
-    fn match_elements(
-        &self,
-        elements: &[Element],
-        words: &[String],
-        pos: usize,
-        enclosing: Option<usize>,
-        relax_verbs: bool,
-        bindings: &mut Vec<Binding>,
-    ) -> bool {
-        let Some((first, rest)) = elements.split_first() else {
-            return pos == words.len()
-                && self.verbs_allowed(bindings, words, enclosing, relax_verbs);
-        };
-        match first {
-            Element::Literal(literal) => {
-                let end = pos + literal.len();
-                words.get(pos..end) == Some(literal.as_slice())
-                    && self.match_elements(rest, words, end, enclosing, relax_verbs, bindings)
-            }
-            Element::Noun(form) => (pos + 1..=words.len()).any(|end| {
-                self.term_for_form(*form, &words[pos..end])
-                    .is_some_and(|term| {
-                        bindings.push(Binding::Noun { term });
-                        if self.match_elements(rest, words, end, enclosing, relax_verbs, bindings) {
-                            true
-                        } else {
-                            bindings.pop();
-                            false
-                        }
-                    })
-            }),
-            Element::Vocabulary(name) => {
-                self.vocabularies
-                    .get(name.as_str())
-                    .is_some_and(|vocabulary| {
-                        vocabulary.words.iter().any(|entry| {
-                            let end = pos + entry.as_slice().len();
-                            words.get(pos..end) == Some(entry.as_slice())
-                                && self.match_elements(
-                                    rest,
-                                    words,
-                                    end,
-                                    enclosing,
-                                    relax_verbs,
-                                    bindings,
-                                )
-                        })
-                    })
-            }
-            // `{any}` needs at least one word, so `get{any}` does not match
-            // `get` alone.
-            Element::Any => (pos + 1..=words.len())
-                .any(|end| self.match_elements(rest, words, end, enclosing, relax_verbs, bindings)),
-            Element::Verb(form) => {
-                let remaining = words.len() - pos;
-                (1..=remaining).any(|len| {
-                    let end = pos + len;
-                    // In relaxed matching a `{verb}` takes only a single word
-                    // or a known verb form, so that it cannot swallow
-                    // unrelated words and produce a misleading message.
-                    if relax_verbs && len > 1 && !self.verb_forms.contains(&words[pos..end]) {
-                        return false;
-                    }
-                    bindings.push(Binding::Verb {
-                        form: *form,
-                        span: pos..end,
-                    });
-                    if self.match_elements(rest, words, end, enclosing, relax_verbs, bindings) {
-                        true
-                    } else {
-                        bindings.pop();
-                        false
-                    }
-                })
-            }
-        }
-    }
-
-    /// Tells whether every `{verb}` binding is a form of a defined behavior
-    /// of the bound term: the term of the `{noun}` matched in the same
-    /// identifier or, if there is none, of the innermost enclosing type.
-    fn verbs_allowed(
-        &self,
-        bindings: &[Binding],
-        words: &[String],
-        enclosing: Option<usize>,
-        relax_verbs: bool,
-    ) -> bool {
-        if relax_verbs || !bindings.iter().any(|b| matches!(b, Binding::Verb { .. })) {
-            return true;
-        }
-        let Some(term) = self.bound_term(bindings, enclosing) else {
-            return false;
-        };
-        bindings.iter().all(|binding| match binding {
-            Binding::Verb { form, span } => self.term_allows(term, *form, &words[span.clone()]),
-            Binding::Noun { .. } => true,
         })
     }
 
-    /// Returns the term the `{verb}` elements are bound to: the term of the
-    /// first `{noun}` matched in the same identifier or, if there is none,
-    /// of the innermost enclosing named type.
-    fn bound_term(&self, bindings: &[Binding], enclosing: Option<usize>) -> Option<usize> {
-        bindings
+    /// Describes the nearest relaxed match, preferring the fewest verb words.
+    /// Ties keep pattern order, just as strict matching does.
+    fn describe(&self, identifier: &Identifier, rule: &Rule) -> String {
+        let name = identifier.name;
+        let words = &identifier.words;
+        let nearest = rule
+            .patterns
             .iter()
-            .find_map(|binding| match binding {
-                Binding::Noun { term } => Some(*term),
-                Binding::Verb { .. } => None,
+            .filter_map(|pattern| {
+                self.matcher
+                    .attempt(
+                        pattern,
+                        words,
+                        identifier.enclosing_term,
+                        MatchMode::Relaxed,
+                    )
+                    .map(|bindings| (pattern, bindings))
             })
-            .or(enclosing)
-    }
-
-    /// Returns the term whose singular or plural form is `words`.
-    fn term_for_form(&self, form: NounForm, words: &[String]) -> Option<usize> {
-        match form {
-            NounForm::Singular => self.singular.get(words).copied(),
-            NounForm::Plural => self.plural.get(words).copied(),
+            .min_by_key(|(_, bindings)| bindings.verb_words());
+        let Some((pattern, bindings)) = nearest else {
+            return self.no_pattern_message(name, rule);
+        };
+        let prefix = format!(
+            "`{}` does not match pattern `{}` of rule `{}`",
+            name.text,
+            pattern.source(),
+            rule.id
+        );
+        let term = bindings.bound_term(identifier.enclosing_term);
+        let failing_verb = term.and_then(|term| {
+            bindings
+                .verbs()
+                .find(|(form, span)| !self.matcher.term_allows(term, *form, &words[span.clone()]))
+        });
+        match (term, failing_verb) {
+            (Some(term), Some((form, span))) => {
+                let verb_words = &words[span];
+                let verb = verb_words.join(" ");
+                let term_name = &self.dictionary.terms[term].name;
+                if let Some(expected) = self.matcher.term_behavior_form(term, verb_words, form) {
+                    format!(
+                        "{prefix}: `{verb}` is a defined behavior of `{term_name}` in a \
+                         different form, but `{}` expects `{expected}`",
+                        verb_placeholder(form),
+                    )
+                } else {
+                    format!(
+                        "{prefix}: `{verb}` is not a defined behavior of `{term_name}` ({})",
+                        self.defined_behaviors(term),
+                    )
+                }
+            }
+            (None, _) if bindings.verbs().next().is_some() => {
+                let reason = match identifier.enclosing_type {
+                    Some(enclosing_type) => {
+                        format!("the enclosing type `{enclosing_type}` is not in the dictionary")
+                    }
+                    None => "the identifier contains no `{noun}` and there is no enclosing type"
+                        .to_owned(),
+                };
+                format!("{prefix}: `{{verb}}` is not bound to a term: {reason}")
+            }
+            _ => self.no_pattern_message(name, rule),
         }
-    }
-
-    /// Returns the words of `form` of the behavior of `term` that `words`
-    /// are a form of, if any: the form the pattern expects instead.
-    fn term_behavior_form(&self, term: usize, words: &[String], form: VerbForm) -> Option<Words> {
-        self.dictionary.terms[term]
-            .behaviors
-            .iter()
-            .find(|behavior| behavior.forms.all().iter().any(|f| f.as_slice() == words))
-            .map(|behavior| behavior.forms.get(form).clone())
-    }
-
-    /// Tells whether `words` are the given form of a behavior of `term`.
-    fn term_allows(&self, term: usize, form: VerbForm, words: &[String]) -> bool {
-        self.dictionary.terms[term]
-            .behaviors
-            .iter()
-            .any(|behavior| behavior.forms.get(form).as_slice() == words)
-    }
-
-    /// Returns the term of the innermost enclosing type, if it is one.
-    fn enclosing_term(&self, symbols: &Symbols, symbol: &Symbol) -> Option<usize> {
-        self.enclosing_type(symbols, symbol).and_then(|enclosing| {
-            let name = enclosing.name.as_ref().expect("the type is named");
-            let words = identifier::split(&name.text);
-            self.term_for_form(NounForm::Singular, &words)
-                .or_else(|| self.term_for_form(NounForm::Plural, &words))
-        })
-    }
-
-    /// Returns the innermost enclosing type with a name.
-    ///
-    /// Anonymous classes are skipped, named types are not: a method of a
-    /// named `Order.Builder` is bound to `Builder`, and reported as unbound
-    /// when `Builder` is not a term of the dictionary.
-    fn enclosing_type<'s>(&self, symbols: &'s Symbols, symbol: &'s Symbol) -> Option<&'s Symbol> {
-        symbols
-            .ancestors(symbol)
-            .find(|ancestor| ancestor.kind == SymbolKind::Type && ancestor.name.is_some())
-    }
-
-    fn enclosing_type_name<'s>(&self, symbols: &'s Symbols, symbol: &'s Symbol) -> Option<&'s str> {
-        self.enclosing_type(symbols, symbol)
-            .and_then(|enclosing| enclosing.name.as_ref().map(|name| name.text.as_str()))
     }
 
     /// Lists the behaviors defined for a term, for violation messages.
@@ -1122,5 +871,117 @@ rules:
                  not bound to a term: the enclosing type `Builder` is not in the dictionary",
             ]
         );
+    }
+
+    #[test]
+    fn backtracks_when_a_longer_noun_has_the_required_behavior() {
+        let dictionary = Dictionary::from_yaml_str(&format!(
+            "{DICTIONARY}{}",
+            r#"  - name: OrderLine
+    forms: { singular: order line, plural: order lines }
+    behaviors:
+      - verb: ship
+        forms: { base: ship, s: ships, past: shipped, pp: shipped, ing: shipping }
+"#
+        ))
+        .unwrap();
+        let config = Config::from_yaml_str(
+            r#"
+rules:
+  - id: method
+    include: ["**"]
+    target: method
+    patterns: ["{noun}{any}{verb}"]
+"#,
+        )
+        .unwrap();
+        let checker = Checker::new(&dictionary, &config);
+        // `Order` matches first, but cannot `ship`. Its noun and verb
+        // bindings must be undone before trying the longer `OrderLine`.
+        let symbols = order_class(&[(SymbolKind::Method, "orderLineExtraShip", 4)]);
+        assert_eq!(checker.check(&symbols, Path::new(DOMAIN)), []);
+    }
+
+    #[test]
+    fn backtracks_when_a_verb_or_vocabulary_needs_more_words() {
+        let dictionary = Dictionary::from_yaml_str(CHECKOUT_DICTIONARY).unwrap();
+        for (pattern, identifier) in [
+            ("{verb}{any}{noun}", "checkOutExtraOrder"),
+            ("{role}{verb}{noun}", "serviceExtraPlaceOrder"),
+        ] {
+            let config = Config::from_yaml_str(&format!(
+                r#"
+vocabularies:
+  role: [service, service extra]
+rules:
+  - id: method
+    include: ["**"]
+    target: method
+    patterns: ["{pattern}"]
+"#
+            ))
+            .unwrap();
+            let checker = Checker::new(&dictionary, &config);
+            let symbols = order_class(&[(SymbolKind::Method, identifier, 4)]);
+            assert_eq!(
+                checker.check(&symbols, Path::new(DOMAIN)),
+                [],
+                "{identifier}"
+            );
+        }
+    }
+
+    #[test]
+    fn binds_all_verbs_to_the_first_of_multiple_nouns() {
+        let (dictionary, _) = setup();
+        let config = Config::from_yaml_str(
+            r#"
+rules:
+  - id: method
+    include: ["**"]
+    target: method
+    patterns: ["{noun}{verb}{noun}{verb}"]
+"#,
+        )
+        .unwrap();
+        let checker = Checker::new(&dictionary, &config);
+        let symbols = order_class(&[
+            (SymbolKind::Method, "orderPlaceLineItemCancel", 4),
+            (SymbolKind::Method, "lineItemPlaceOrderCancel", 7),
+        ]);
+        assert_eq!(
+            messages(&checker.check(&symbols, Path::new(DOMAIN))),
+            [
+                "`lineItemPlaceOrderCancel` does not match pattern `{noun}{verb}{noun}{verb}` of \
+             rule `method`: `place` is not a defined behavior of `LineItem` (no behaviors are defined)"
+            ]
+        );
+    }
+
+    #[test]
+    fn nearest_pattern_ties_keep_the_configured_order() {
+        let (dictionary, _) = setup();
+        let patterns = ["{verb}{noun}", "{any}{verb}"];
+        for (first, second) in [(patterns[0], patterns[1]), (patterns[1], patterns[0])] {
+            let config = Config::from_yaml_str(&format!(
+                r#"
+rules:
+  - id: method
+    include: ["**"]
+    target: method
+    patterns: ["{first}", "{second}"]
+"#
+            ))
+            .unwrap();
+            let checker = Checker::new(&dictionary, &config);
+            let symbols = order_class(&[(SymbolKind::Method, "updateOrder", 4)]);
+            let diagnostics = checker.check(&symbols, Path::new(DOMAIN));
+            assert_eq!(diagnostics.len(), 1);
+            assert!(
+                diagnostics[0]
+                    .message
+                    .contains(&format!("does not match pattern `{first}`"))
+            );
+        }
     }
 }
