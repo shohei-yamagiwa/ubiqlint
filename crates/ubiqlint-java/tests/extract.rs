@@ -601,3 +601,16 @@ fn accepts_empty_files() {
     assert!(symbols("").is_empty());
     assert!(symbols("// nothing here\n").is_empty());
 }
+
+#[test]
+fn keeps_modifiers_in_spans_across_comments() {
+    let source = "class A { void f() {\n\
+                  if (o instanceof final /* c */ Card card) {}\n\
+                  if (o instanceof /* c */ final Card cash) {}\n\
+                  for (final /* c */ Item item : items) {}\n\
+                  } }";
+    let symbols = symbols(source);
+    assert_eq!(find(&symbols, "card").span, span((2, 18), (2, 41)));
+    assert_eq!(find(&symbols, "cash").span, span((3, 26), (3, 41)));
+    assert_eq!(find(&symbols, "item").span, span((4, 6), (4, 29)));
+}

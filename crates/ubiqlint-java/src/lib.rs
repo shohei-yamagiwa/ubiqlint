@@ -173,9 +173,7 @@ impl Extractor<'_> {
             }
             "instanceof_expression" => {
                 // `final Order order` in `o instanceof final Order order`.
-                let start = node
-                    .child_by_field_name("right")
-                    .map(|ty| token_before(ty, "final").unwrap_or(ty));
+                let start = child_after(node, "instanceof");
                 self.declare_between(SymbolKind::Variable, node, start, parent);
                 parent
             }
@@ -301,7 +299,12 @@ fn modifiers(node: Node) -> Option<Node> {
     named_child_of_kind(node, "modifiers")
 }
 
-/// Returns the token `kind` directly before `node`, if there is one.
-fn token_before<'tree>(node: Node<'tree>, kind: &str) -> Option<Node<'tree>> {
-    node.prev_sibling().filter(|token| token.kind() == kind)
+/// Returns the first child of `node` after the token `kind`, skipping
+/// comments.
+fn child_after<'tree>(node: Node<'tree>, kind: &str) -> Option<Node<'tree>> {
+    let mut cursor = node.walk();
+    node.children(&mut cursor)
+        .skip_while(|child| child.kind() != kind)
+        .skip(1)
+        .find(|child| !child.is_extra())
 }
