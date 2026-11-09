@@ -172,7 +172,7 @@ fn check_reports_an_unreadable_config() {
 }
 
 #[test]
-fn check_reports_an_invalid_config() {
+fn check_reports_config_and_dictionary_errors_in_one_run() {
     let output = ubiqlint(&["check", "--config", "tests/fixtures/invalid/ubiqlint.yaml"]);
 
     assert_eq!(output.status.code(), Some(1));
@@ -183,6 +183,10 @@ tests/fixtures/invalid/ubiqlint.yaml:4:13: error: unknown target `class`, \
 expected one of `type`, `method`, `field`, `parameter`, `variable`
 tests/fixtures/invalid/ubiqlint.yaml:6:9: error: unknown placeholder `{role}`: \
 expected `{noun}`, `{verb}`, `{any}` or a vocabulary defined in `vocabularies`
+tests/fixtures/invalid/terms.yaml:5:5: error: unknown field `forbidden_verbs` in a term, \
+expected one of `name`, `kind`, `ja`, `description`, `forms`, `behaviors`
+tests/fixtures/invalid/terms.yaml:8:16: error: missing required field `pp` in `forms` of a behavior
+tests/fixtures/invalid/terms.yaml:8:16: error: missing required field `ing` in `forms` of a behavior
 "
     );
 }
@@ -201,4 +205,91 @@ fn check_accepts_the_sample_project() {
         stdout(&output)
     );
     assert_eq!(stdout(&output), "");
+}
+
+#[test]
+fn check_never_reads_files_matched_by_exclude() {
+    let output = ubiqlint(&[
+        "check",
+        "--config",
+        "tests/fixtures/check/excluded/ubiqlint.yaml",
+    ]);
+
+    assert!(
+        output.status.success(),
+        "unexpected output: {}",
+        stdout(&output)
+    );
+    assert_eq!(stdout(&output), "");
+}
+
+#[test]
+fn check_respects_gitignore() {
+    // The fixture has no `.git` directory, so this also covers sources
+    // distributed as a tarball.
+    let output = ubiqlint(&[
+        "check",
+        "--config",
+        "tests/fixtures/check/gitignored/ubiqlint.yaml",
+    ]);
+
+    assert!(
+        output.status.success(),
+        "unexpected output: {}",
+        stdout(&output)
+    );
+    assert_eq!(stdout(&output), "");
+}
+
+#[test]
+fn check_follows_symlinks() {
+    let output = ubiqlint(&[
+        "check",
+        "--config",
+        "tests/fixtures/check/symlinked/ubiqlint.yaml",
+    ]);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        stdout(&output),
+        "tests/fixtures/check/symlinked/linked/Bad.java:2:17: error: `update` does not match \
+         pattern `{verb}` of rule `domain-method`: `{verb}` is not bound to a term: the enclosing \
+         type `Bad` is not in the dictionary\n"
+    );
+}
+
+#[test]
+fn check_reports_a_file_that_is_not_utf8_and_keeps_going() {
+    let output = ubiqlint(&[
+        "check",
+        "--config",
+        "tests/fixtures/check/nonutf8/ubiqlint.yaml",
+    ]);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        stdout(&output),
+        "tests/fixtures/check/nonutf8/src/Legacy.java: error: cannot read the file: \
+         stream did not contain valid UTF-8\n"
+    );
+}
+
+#[test]
+fn check_exits_1_instead_of_panicking_when_the_output_pipe_is_closed() {
+    use std::process::Stdio;
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_ubiqlint"))
+        .args([
+            "check",
+            "--config",
+            "tests/fixtures/check/bad/ubiqlint.yaml",
+        ])
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("failed to run ubiqlint");
+    // Close the read end immediately, so the child's writes hit EPIPE.
+    drop(child.stdout.take());
+    let status = child.wait().expect("failed to wait for ubiqlint");
+    assert_eq!(status.code(), Some(1));
 }

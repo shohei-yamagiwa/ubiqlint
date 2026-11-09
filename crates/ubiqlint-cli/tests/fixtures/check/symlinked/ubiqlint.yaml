@@ -1,0 +1,6 @@
+rules:
+  - id: domain-method
+    include: ["linked/**"]
+    target: method
+    patterns:
+      - "{verb}"

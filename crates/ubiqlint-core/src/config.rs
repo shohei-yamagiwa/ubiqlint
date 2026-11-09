@@ -21,6 +21,10 @@ pub const CONFIG_FILE_NAME: &str = "ubiqlint.yaml";
 pub struct Config {
     pub vocabularies: Vec<Vocabulary>,
     pub rules: Vec<Rule>,
+    /// Kept private, together with its compiled form, so that the two
+    /// cannot get out of sync.
+    exclude_globs: Vec<String>,
+    exclude_set: GlobSet,
 }
 
 /// A named list of word sequences that patterns can refer to, such as
@@ -98,6 +102,18 @@ impl Config {
         let config = read_config(&mut diags, &root);
         diags.finish(config)
     }
+
+    /// Returns the glob patterns of the files that are never checked, as
+    /// written in `exclude`.
+    pub fn exclude_globs(&self) -> &[String] {
+        &self.exclude_globs
+    }
+
+    /// Tells whether `path`, given relative to the directory of the
+    /// configuration file, is excluded by `exclude`.
+    pub fn excludes(&self, path: &Path) -> bool {
+        self.exclude_set.is_match(path)
+    }
 }
 
 impl Rule {
@@ -115,7 +131,12 @@ impl Rule {
 }
 
 fn read_config(diags: &mut Diagnostics, node: &Node) -> Option<Config> {
-    let fields = Fields::new(diags, node, "the configuration", &["vocabularies", "rules"])?;
+    let fields = Fields::new(
+        diags,
+        node,
+        "the configuration",
+        &["vocabularies", "exclude", "rules"],
+    )?;
     // Patterns may refer to every vocabulary that is declared, even an
     // invalid one, so that a bad vocabulary is reported once instead of
     // again at each pattern that uses it.
@@ -133,9 +154,16 @@ fn read_config(diags: &mut Diagnostics, node: &Node) -> Option<Config> {
                 .filter_map(|item| read_rule(diags, item, &names, &mut ids))
                 .collect::<Vec<_>>()
         });
+    let (exclude_globs, exclude_set) = yaml::optional(&fields, "exclude", |node| {
+        read_globs(diags, node, "`exclude`")
+    })
+    .flatten()
+    .unwrap_or_else(|| (Vec::new(), GlobSet::empty()));
     Some(Config {
         vocabularies: vocabularies?.unwrap_or_default(),
         rules: rules?,
+        exclude_globs,
+        exclude_set,
     })
 }
 
@@ -214,7 +242,7 @@ fn read_rule(
     });
     let include = fields
         .required(diags, "include")
-        .and_then(|node| read_include(diags, node));
+        .and_then(|node| read_globs(diags, node, "`include`"));
     let target = fields
         .required(diags, "target")
         .and_then(|node| read_target(diags, node));
@@ -260,13 +288,15 @@ fn read_rule_id<'a>(diags: &mut Diagnostics, node: &'a Node) -> Option<&'a str> 
     Some(id)
 }
 
-fn read_include(diags: &mut Diagnostics, node: &Node) -> Option<(Vec<String>, GlobSet)> {
-    let items = yaml::non_empty_sequence(diags, node, "`include`")?;
+/// Reads a list of globs, such as `include` or `exclude`, with the same
+/// syntax: `*` does not cross directory separators, `**` does.
+fn read_globs(diags: &mut Diagnostics, node: &Node, what: &str) -> Option<(Vec<String>, GlobSet)> {
+    let items = yaml::non_empty_sequence(diags, node, what)?;
     let mut globs = Vec::with_capacity(items.len());
     let mut builder = GlobSetBuilder::new();
     let mut failed = false;
     for item in items {
-        let Some(text) = yaml::non_empty_string(diags, item, "a glob in `include`") else {
+        let Some(text) = yaml::non_empty_string(diags, item, &format!("a glob in {what}")) else {
             failed = true;
             continue;
         };
@@ -292,7 +322,7 @@ fn read_include(diags: &mut Diagnostics, node: &Node) -> Option<(Vec<String>, Gl
         Err(error) => {
             diags.error(
                 yaml::location(node),
-                format!("invalid globs in `include`: {error}"),
+                format!("invalid globs in {what}: {error}"),
             );
             None
         }
@@ -568,6 +598,41 @@ rules:
         assert_eq!(
             errors("vocabularies: {}\n"),
             ["1:1: missing required field `rules` in the configuration"]
+        );
+    }
+
+    #[test]
+    fn reads_and_matches_exclude_globs() {
+        let source = r#"
+exclude: ["target/**", "legacy/**"]
+rules:
+  - id: domain-type
+    include: ["**/domain/**"]
+    target: type
+    patterns: ["{noun}"]
+"#;
+        let config = Config::from_yaml_str(source).unwrap();
+        assert_eq!(config.exclude_globs(), ["target/**", "legacy/**"]);
+        assert!(config.excludes(Path::new("target/debug/Build.java")));
+        assert!(config.excludes(Path::new("legacy/Old.java")));
+        assert!(!config.excludes(Path::new("src/domain/Order.java")));
+        // `legacy/**` does not match `legacy` itself, as in `include`.
+        assert!(!config.excludes(Path::new("legacy")));
+    }
+
+    #[test]
+    fn exclude_is_optional() {
+        let config = Config::from_yaml_str(EXAMPLE).unwrap();
+        assert!(config.exclude_globs().is_empty());
+        assert!(!config.excludes(Path::new("anything.java")));
+    }
+
+    #[test]
+    fn reports_invalid_exclude_globs() {
+        let source = "exclude: [\"src/[a\"]\nrules: []\n";
+        assert_eq!(
+            errors(source),
+            ["1:11: invalid glob `src/[a`: unclosed character class; missing ']'"]
         );
     }
 

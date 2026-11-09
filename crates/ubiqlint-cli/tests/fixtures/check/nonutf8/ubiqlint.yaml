@@ -1,0 +1,7 @@
+rules:
+  - id: domain-method
+    include: ["src/**"]
+    target: method
+    patterns:
+      - "{verb}"
+      - "{verb}{noun}"

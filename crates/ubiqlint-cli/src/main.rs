@@ -1,8 +1,10 @@
 use std::fs;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
+use ignore::WalkBuilder;
 use ubiqlint_core::{
     CONFIG_FILE_NAME, Checker, Config, DICTIONARY_FILE_NAME, Diagnostic, Dictionary,
     LanguageAdapter,
@@ -43,50 +45,86 @@ enum Command {
 const ADAPTERS: [&dyn LanguageAdapter; 1] = [&JavaAdapter];
 
 fn main() -> ExitCode {
+    let mut reporter = Reporter::new();
     match Cli::parse().command {
-        Command::Validate { files } => validate(&files),
-        Command::Check { config, dictionary } => check(&config, dictionary.as_deref()),
+        Command::Validate { files } => validate(&mut reporter, &files),
+        Command::Check { config, dictionary } => {
+            check(&mut reporter, &config, dictionary.as_deref())
+        }
+    }
+    reporter.finish()
+}
+
+/// Prints problems to stdout, one per line. Rust ignores SIGPIPE, so a
+/// closed pipe (`ubiqlint check ... | head -1`) is a write error here, not
+/// a panic: the run just fails with exit code 1.
+struct Reporter {
+    out: io::BufWriter<io::StdoutLock<'static>>,
+    failed: bool,
+    broken: bool,
+}
+
+impl Reporter {
+    fn new() -> Self {
+        Self {
+            out: io::BufWriter::new(io::stdout().lock()),
+            failed: false,
+            broken: false,
+        }
+    }
+
+    /// Prints one line, unless the pipe is already broken.
+    fn line(&mut self, text: &str) {
+        if self.broken {
+            return;
+        }
+        if writeln!(self.out, "{text}").is_err() {
+            self.broken = true;
+            self.failed = true;
+        }
+    }
+
+    /// Prints one problem and fails the run.
+    fn problem(&mut self, text: &str) {
+        self.failed = true;
+        self.line(text);
+    }
+
+    fn finish(mut self) -> ExitCode {
+        let _ = self.out.flush();
+        if self.failed {
+            ExitCode::FAILURE
+        } else {
+            ExitCode::SUCCESS
+        }
     }
 }
 
-/// Prints every problem in `files` and fails if there was any.
-fn validate(files: &[PathBuf]) -> ExitCode {
-    let mut valid = true;
+/// Checks that each file is a well-formed dictionary or configuration file.
+fn validate(reporter: &mut Reporter, files: &[PathBuf]) {
     for path in files {
-        if let Err(problems) = validate_file(path) {
-            valid = false;
-            for problem in problems {
-                println!("{}", single_line(&problem));
-            }
-        }
-    }
-    if valid {
-        ExitCode::SUCCESS
-    } else {
-        ExitCode::FAILURE
+        let parse: fn(&str) -> Result<(), Vec<Diagnostic>> =
+            match path.file_name().and_then(|name| name.to_str()) {
+                Some(DICTIONARY_FILE_NAME) => |source| Dictionary::from_yaml_str(source).map(drop),
+                Some(CONFIG_FILE_NAME) => |source| Config::from_yaml_str(source).map(drop),
+                _ => {
+                    reporter.problem(&format!(
+                        "{}: error: cannot tell what kind of file this is: name a dictionary \
+                         `{DICTIONARY_FILE_NAME}` and a configuration file `{CONFIG_FILE_NAME}`",
+                        path.display()
+                    ));
+                    continue;
+                }
+            };
+        load(reporter, path, parse);
     }
 }
 
 /// Checks every source file under the configuration file's directory,
-/// printing every problem as `path:line:column: error: message`, and fails
-/// if there was any.
-fn check(config_path: &Path, dictionary: Option<&Path>) -> ExitCode {
-    let dictionary_path = dictionary.map_or_else(
-        || {
-            config_path
-                .parent()
-                .unwrap_or_else(|| Path::new(""))
-                .join(DICTIONARY_FILE_NAME)
-        },
-        Path::to_owned,
-    );
-    let Some(config) = load(config_path, Config::from_yaml_str) else {
-        return ExitCode::FAILURE;
-    };
-    let Some(dictionary) = load(&dictionary_path, Dictionary::from_yaml_str) else {
-        return ExitCode::FAILURE;
-    };
-
+/// printing every problem as `path:line:column: error: message`.
+fn check(reporter: &mut Reporter, config_path: &Path, dictionary: Option<&Path>) {
+    // Every checked path is relative to the directory of the configuration
+    // file, which is also where the default dictionary lives.
     let root = config_path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -96,14 +134,23 @@ fn check(config_path: &Path, dictionary: Option<&Path>) -> ExitCode {
     } else {
         root
     };
-    let mut files = Vec::new();
-    collect_files(read_root, root, &mut files);
-    files.sort_by(|(_, left), (_, right)| left.cmp(right));
+    let dictionary_path =
+        dictionary.map_or_else(|| root.join(DICTIONARY_FILE_NAME), Path::to_owned);
+
+    // Load both files before failing, so that every problem is reported in
+    // one run.
+    let config = load(reporter, config_path, Config::from_yaml_str);
+    let dictionary = load(reporter, &dictionary_path, Dictionary::from_yaml_str);
+    let (Some(config), Some(dictionary)) = (config, dictionary) else {
+        return;
+    };
 
     let checker = Checker::new(&dictionary, &config);
-    let mut failed = false;
-    for (read_path, display) in &files {
-        let extension = read_path
+    for relative in collect_files(reporter, read_root) {
+        if config.excludes(&relative) {
+            continue;
+        }
+        let extension = relative
             .extension()
             .and_then(|extension| extension.to_str());
         let Some(adapter) = extension.and_then(|extension| {
@@ -114,72 +161,81 @@ fn check(config_path: &Path, dictionary: Option<&Path>) -> ExitCode {
         }) else {
             continue;
         };
-        let shown = display.display();
-        let source = match fs::read_to_string(read_path) {
+        let shown = root.join(&relative).display().to_string();
+        let source = match fs::read_to_string(read_root.join(&relative)) {
             Ok(source) => source,
             Err(error) => {
-                failed = true;
-                println!("{shown}: error: cannot read the file: {error}");
+                reporter.problem(&format!("{shown}: error: cannot read the file: {error}"));
                 continue;
             }
         };
-        let relative = display.strip_prefix(root).unwrap_or(display);
         match adapter.extract(&source) {
             Err(errors) => {
-                failed = true;
                 for error in &errors {
-                    println!(
+                    reporter.problem(&format!(
                         "{shown}:{}: error: {}",
                         error.location,
                         single_line(&error.message)
-                    );
+                    ));
                 }
             }
             Ok(symbols) => {
-                let diagnostics = checker.check(&symbols, relative);
-                failed |= !diagnostics.is_empty();
-                for diagnostic in &diagnostics {
-                    println!(
+                for diagnostic in checker.check(&symbols, &relative) {
+                    reporter.problem(&format!(
                         "{shown}:{}: error: {}",
                         diagnostic.location,
                         single_line(&diagnostic.message)
-                    );
+                    ));
                 }
             }
         }
     }
-    if failed {
-        ExitCode::FAILURE
-    } else {
-        ExitCode::SUCCESS
-    }
 }
 
-/// Collects every regular file under `read_base`, paired with its path
-/// relative to `rel_base`, for display and rule matching.
-fn collect_files(read_base: &Path, rel_base: &Path, files: &mut Vec<(PathBuf, PathBuf)>) {
-    let Ok(entries) = fs::read_dir(read_base) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        let read = read_base.join(&name);
-        let relative = rel_base.join(&name);
-        match entry.file_type() {
-            Ok(file_type) if file_type.is_dir() => collect_files(&read, &relative, files),
-            Ok(file_type) if file_type.is_file() => files.push((read, relative)),
-            _ => {}
+/// Collects the paths of all files under `read_root`, relative to it and
+/// sorted. `.gitignore` (and `.ignore`, `.git/info/exclude`, parent
+/// directories' `.gitignore`) are respected even outside a git repository,
+/// hidden files such as `.git` are skipped, and symlinks are followed.
+/// Walk errors are reported, since silently skipping a directory would hide
+/// violations.
+fn collect_files(reporter: &mut Reporter, read_root: &Path) -> Vec<PathBuf> {
+    let walker = WalkBuilder::new(read_root)
+        .follow_links(true)
+        .require_git(false)
+        .build();
+    let mut files = Vec::new();
+    for entry in walker {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                reporter.problem(&format!(
+                    "{}: error: cannot walk the directory: {error}",
+                    read_root.display()
+                ));
+                continue;
+            }
+        };
+        if !entry.path().is_file() {
+            continue;
         }
+        let relative = entry.path().strip_prefix(read_root).unwrap_or(entry.path());
+        files.push(relative.to_path_buf());
     }
+    files.sort();
+    files
 }
 
-/// Reads `path` and parses it, printing every problem found.
-fn load<T>(path: &Path, parse: fn(&str) -> Result<T, Vec<Diagnostic>>) -> Option<T> {
+/// Reads `path` and parses it, reporting every problem through `reporter`.
+fn load<T>(
+    reporter: &mut Reporter,
+    path: &Path,
+    parse: fn(&str) -> Result<T, Vec<Diagnostic>>,
+) -> Option<T> {
     let shown = path.display();
     let source = match fs::read_to_string(path) {
         Ok(source) => source,
         Err(error) => {
-            println!("{shown}: error: cannot read the file: {error}");
+            reporter.problem(&format!("{shown}: error: cannot read the file: {error}"));
             return None;
         }
     };
@@ -187,11 +243,11 @@ fn load<T>(path: &Path, parse: fn(&str) -> Result<T, Vec<Diagnostic>>) -> Option
         Ok(value) => Some(value),
         Err(diagnostics) => {
             for diagnostic in &diagnostics {
-                println!(
+                reporter.problem(&format!(
                     "{shown}:{}: error: {}",
                     diagnostic.location,
                     single_line(&diagnostic.message)
-                );
+                ));
             }
             None
         }
@@ -210,32 +266,4 @@ fn single_line(text: &str) -> String {
         }
     }
     line
-}
-
-fn validate_file(path: &Path) -> Result<(), Vec<String>> {
-    let shown = path.display();
-    let read: fn(&str) -> Result<(), Vec<ubiqlint_core::Diagnostic>> =
-        match path.file_name().and_then(|name| name.to_str()) {
-            Some(DICTIONARY_FILE_NAME) => |source| Dictionary::from_yaml_str(source).map(drop),
-            Some(CONFIG_FILE_NAME) => |source| Config::from_yaml_str(source).map(drop),
-            _ => {
-                return Err(vec![format!(
-                    "{shown}: error: cannot tell what kind of file this is: name a dictionary \
-                     `{DICTIONARY_FILE_NAME}` and a configuration file `{CONFIG_FILE_NAME}`"
-                )]);
-            }
-        };
-    let source = fs::read_to_string(path)
-        .map_err(|error| vec![format!("{shown}: error: cannot read the file: {error}")])?;
-    read(&source).map_err(|diagnostics| {
-        diagnostics
-            .iter()
-            .map(|diagnostic| {
-                format!(
-                    "{shown}:{}: error: {}",
-                    diagnostic.location, diagnostic.message
-                )
-            })
-            .collect()
-    })
 }
