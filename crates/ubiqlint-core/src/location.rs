@@ -48,16 +48,27 @@ pub struct LineIndex<'a> {
     source: &'a str,
     /// The byte offset at which each line starts.
     line_starts: Vec<usize>,
+    /// For each character longer than one byte, its byte offset and the
+    /// number of bytes beyond the first in it and every such character
+    /// before it. This turns byte offsets into character columns without
+    /// rescanning long lines.
+    multibyte: Vec<(usize, usize)>,
 }
 
 impl<'a> LineIndex<'a> {
     pub fn new(source: &'a str) -> Self {
         let bytes = source.as_bytes();
         let mut line_starts = vec![0];
-        for (offset, &byte) in bytes.iter().enumerate() {
-            let ends_line = match byte {
-                b'\n' => true,
-                b'\r' => bytes.get(offset + 1) != Some(&b'\n'),
+        let mut multibyte = Vec::new();
+        let mut extra_bytes = 0;
+        for (offset, c) in source.char_indices() {
+            if c.len_utf8() > 1 {
+                extra_bytes += c.len_utf8() - 1;
+                multibyte.push((offset, extra_bytes));
+            }
+            let ends_line = match c {
+                '\n' => true,
+                '\r' => bytes.get(offset + 1) != Some(&b'\n'),
                 _ => false,
             };
             if ends_line {
@@ -67,6 +78,7 @@ impl<'a> LineIndex<'a> {
         Self {
             source,
             line_starts,
+            multibyte,
         }
     }
 
@@ -89,10 +101,20 @@ impl<'a> LineIndex<'a> {
         }
         let line = self.line_starts.partition_point(|&start| start <= offset);
         let line_start = self.line_starts[line - 1];
+        let extra_bytes = self.extra_bytes_before(offset) - self.extra_bytes_before(line_start);
         Location {
             line,
-            column: self.source[line_start..offset].chars().count() + 1,
+            column: offset - line_start - extra_bytes + 1,
         }
+    }
+
+    /// Returns how many bytes beyond the first the characters before
+    /// `offset` have in total. `offset` must be a character boundary.
+    fn extra_bytes_before(&self, offset: usize) -> usize {
+        let count = self.multibyte.partition_point(|&(start, _)| start < offset);
+        count
+            .checked_sub(1)
+            .map_or(0, |last| self.multibyte[last].1)
     }
 
     /// Returns the span of the bytes from `start` to `end`.
@@ -141,6 +163,29 @@ mod tests {
         assert_eq!(lines.location(offset), at(1, 9));
         // Inside the three bytes of `注`.
         assert_eq!(lines.location(6), at(1, 6));
+    }
+
+    #[test]
+    fn agrees_with_counting_characters_at_every_offset() {
+        let source = "a\t注文😀b\r\n\tÉtat x\rß\n😀😀";
+        let lines = LineIndex::new(source);
+        for offset in 0..=source.len() {
+            let mut boundary = offset;
+            while !source.is_char_boundary(boundary) {
+                boundary -= 1;
+            }
+            // Walk the characters before the offset one at a time.
+            let mut expected = at(1, 1);
+            for (i, c) in source[..boundary].char_indices() {
+                let ends_line = c == '\n' || (c == '\r' && !source[i + 1..].starts_with('\n'));
+                expected = if ends_line {
+                    at(expected.line + 1, 1)
+                } else {
+                    at(expected.line, expected.column + 1)
+                };
+            }
+            assert_eq!(lines.location(offset), expected, "offset {offset}");
+        }
     }
 
     #[test]

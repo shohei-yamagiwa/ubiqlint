@@ -9,6 +9,7 @@
 
 use std::fmt;
 use std::slice;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::diagnostic::Diagnostic;
 use crate::location::Span;
@@ -27,8 +28,17 @@ pub trait LanguageAdapter {
 }
 
 /// Identifies a symbol within the [`Symbols`] of one file.
+///
+/// An ID also records which collection it came from, so that an ID from
+/// another file is never mistaken for a symbol of this one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct SymbolId(usize);
+pub struct SymbolId {
+    collection: u64,
+    index: usize,
+}
+
+/// The tag of the next [`Symbols`] created, unique within the process.
+static NEXT_COLLECTION: AtomicU64 = AtomicU64::new(0);
 
 /// The kind of a declaration.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -92,9 +102,22 @@ pub struct Symbol {
 ///
 /// A symbol can only be added after its parent, so parents always come
 /// before their children and following parents always ends.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+///
+/// The collection is not `Clone`: a copy would accept the IDs of symbols
+/// later added to the original.
+#[derive(Debug)]
 pub struct Symbols {
+    collection: u64,
     symbols: Vec<Symbol>,
+}
+
+impl Default for Symbols {
+    fn default() -> Self {
+        Self {
+            collection: NEXT_COLLECTION.fetch_add(1, Ordering::Relaxed),
+            symbols: Vec::new(),
+        }
+    }
 }
 
 impl Symbols {
@@ -114,13 +137,16 @@ impl Symbols {
         span: Span,
         parent: Option<SymbolId>,
     ) -> SymbolId {
-        if let Some(SymbolId(index)) = parent {
+        if let Some(parent) = parent {
             assert!(
-                index < self.symbols.len(),
-                "parent {index} is not a symbol of this collection"
+                self.get(parent).is_some(),
+                "the parent is not a symbol of this collection"
             );
         }
-        let id = SymbolId(self.symbols.len());
+        let id = SymbolId {
+            collection: self.collection,
+            index: self.symbols.len(),
+        };
         self.symbols.push(Symbol {
             id,
             kind,
@@ -134,7 +160,10 @@ impl Symbols {
     /// Returns the symbol with the given ID, or `None` if it belongs to
     /// another collection.
     pub fn get(&self, id: SymbolId) -> Option<&Symbol> {
-        self.symbols.get(id.0)
+        if id.collection != self.collection {
+            return None;
+        }
+        self.symbols.get(id.index)
     }
 
     /// Returns the symbol directly enclosing `symbol`.
@@ -226,21 +255,23 @@ mod tests {
 
     #[test]
     fn returns_none_for_ids_of_other_collections() {
+        // The ID's index is in range for both collections.
         let mut other = Symbols::new();
-        other.push(SymbolKind::Type, name("Order", 1), span(1), None);
-        let id = other.push(SymbolKind::Type, name("LineItem", 2), span(2), None);
+        let id = other.push(SymbolKind::Type, name("LineItem", 1), span(1), None);
         let mut symbols = Symbols::new();
         symbols.push(SymbolKind::Type, name("Order", 1), span(1), None);
         assert_eq!(symbols.get(id), None);
+        assert!(other.get(id).is_some());
     }
 
     #[test]
-    #[should_panic(expected = "parent 1 is not a symbol of this collection")]
-    fn rejects_unknown_parents() {
+    #[should_panic(expected = "the parent is not a symbol of this collection")]
+    fn rejects_parents_from_other_collections() {
         let mut other = Symbols::new();
-        other.push(SymbolKind::Type, name("Order", 1), span(1), None);
-        let parent = other.push(SymbolKind::Type, name("LineItem", 2), span(2), None);
-        Symbols::new().push(SymbolKind::Method, name("place", 3), span(3), Some(parent));
+        let parent = other.push(SymbolKind::Type, name("LineItem", 1), span(1), None);
+        let mut symbols = Symbols::new();
+        symbols.push(SymbolKind::Type, name("Order", 1), span(1), None);
+        symbols.push(SymbolKind::Method, name("place", 2), span(2), Some(parent));
     }
 
     #[test]
