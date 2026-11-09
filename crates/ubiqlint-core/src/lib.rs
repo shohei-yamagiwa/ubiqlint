@@ -16,6 +16,7 @@ pub mod pattern;
 pub mod symbol;
 pub mod words;
 
+mod matching;
 mod yaml;
 
 pub use check::Checker;

@@ -119,6 +119,26 @@ fn check_accepts_a_project_without_violations() {
 }
 
 #[test]
+fn check_uses_default_files_in_the_current_directory() {
+    let fixture = "tests/fixtures/check/bad";
+    let explicit = ubiqlint(&["check", "--config", &format!("{fixture}/ubiqlint.yaml")]);
+    let output = Command::new(env!("CARGO_BIN_EXE_ubiqlint"))
+        .arg("check")
+        .current_dir(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(fixture))
+        .output()
+        .expect("failed to run ubiqlint");
+
+    // The default config has an empty parent path. It must still load the
+    // dictionary and source files, reporting the same violations relative to cwd.
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        stdout(&output),
+        stdout(&explicit).replace(&format!("{fixture}/"), "")
+    );
+    assert_eq!(stderr(&output), "");
+}
+
+#[test]
 fn check_reports_every_violation_with_its_location() {
     let output = ubiqlint(&[
         "check",
