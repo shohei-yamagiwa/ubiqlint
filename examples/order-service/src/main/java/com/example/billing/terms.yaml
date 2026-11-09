@@ -1,0 +1,10 @@
+context: billing
+terms:
+  - name: Invoice
+    kind: entity
+    ja: 請求書
+    description: 注文に対して発行する請求の単位
+    forms: { singular: invoice, plural: invoices }
+    behaviors:
+      - verb: issue
+        forms: { base: issue, s: issues, past: issued, pp: issued, ing: issuing }

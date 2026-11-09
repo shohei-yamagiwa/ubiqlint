@@ -152,7 +152,7 @@ fn check_reports_every_violation_with_its_location() {
         "\
 tests/fixtures/check/bad/src/main/java/com/example/order/domain/Broken.java:3:22: error: syntax error: missing `}`
 tests/fixtures/check/bad/src/main/java/com/example/order/domain/Order.java:7:17: error: `updateOrder` does not match pattern `{verb}{noun}` of rule `domain-method`: `update` is not a defined behavior of `Order` (defined behaviors: `place`, `cancel`)
-tests/fixtures/check/bad/src/main/java/com/example/order/domain/PurchaseService.java:3:14: error: `PurchaseService` does not match any pattern of rule `domain-type`: expected one of `{noun}`, `{noun}{role}`, `{noun}{verb:pp}`. If `PurchaseService` is a new term or behavior of the ubiquitous language, define it in `terms.yaml` first
+tests/fixtures/check/bad/src/main/java/com/example/order/domain/PurchaseService.java:3:14: error: `PurchaseService` does not match any pattern of rule `domain-type`: expected one of `{noun}`, `{noun}{role}`, `{noun}{verb:pp}`. If `PurchaseService` is a new term or behavior of the ubiquitous language, define it in `tests/fixtures/check/bad/terms.yaml` first
 "
     );
 }
@@ -173,7 +173,7 @@ fn check_uses_another_dictionary_when_asked() {
         stdout(&output),
         "\
 tests/fixtures/check/bad/src/main/java/com/example/order/domain/Broken.java:3:22: error: syntax error: missing `}`
-tests/fixtures/check/bad/src/main/java/com/example/order/domain/PurchaseService.java:3:14: error: `PurchaseService` does not match any pattern of rule `domain-type`: expected one of `{noun}`, `{noun}{role}`, `{noun}{verb:pp}`. If `PurchaseService` is a new term or behavior of the ubiquitous language, define it in `terms.yaml` first
+tests/fixtures/check/bad/src/main/java/com/example/order/domain/PurchaseService.java:3:14: error: `PurchaseService` does not match any pattern of rule `domain-type`: expected one of `{noun}`, `{noun}{role}`, `{noun}{verb:pp}`. If `PurchaseService` is a new term or behavior of the ubiquitous language, define it in `tests/fixtures/check/bad/extra-terms.yaml` first
 "
     );
 }
@@ -263,7 +263,7 @@ fn check_exclude_file_glob_does_not_swallow_directories() {
         stdout(&output),
         "tests/fixtures/check/exclude-glob/src/domain/Bad.java:2:17: error: `update` does not \
          match pattern `{verb}` of rule `domain-method`: `{verb}` is not bound to a term: the \
-         enclosing type `Bad` is not in the dictionary\n"
+         enclosing type `Bad` is not in the dictionary `tests/fixtures/check/exclude-glob/terms.yaml`\n"
     );
 }
 
