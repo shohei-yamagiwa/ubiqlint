@@ -249,8 +249,9 @@ fn check_exclude_file_glob_does_not_swallow_directories() {
 
 #[test]
 fn check_respects_gitignore() {
-    // The fixture has no `.git` directory, so this also covers sources
-    // distributed as a tarball.
+    // This fixture lives inside this repository, so it covers the in-repo
+    // case. The tarball case (no `.git` anywhere above) is covered by
+    // `check_applies_gitignore_outside_a_repository`.
     let output = ubiqlint(&[
         "check",
         "--config",
@@ -263,6 +264,7 @@ fn check_respects_gitignore() {
         stdout(&output)
     );
     assert_eq!(stdout(&output), "");
+    assert_eq!(stderr(&output), "");
 }
 
 // A symlink committed to git becomes a plain file on Windows checkouts
@@ -384,6 +386,7 @@ fn check_applies_gitignore_outside_a_repository() {
         stderr(&output)
     );
     assert_eq!(stdout(&output), "");
+    assert_eq!(stderr(&output), "");
 }
 
 // A `.gitignore` above the repository (e.g. `*` in a parent directory) must
@@ -411,6 +414,54 @@ fn check_ignores_gitignore_above_the_repository() {
     );
     assert_eq!(stdout(&output), "");
     assert_eq!(stderr(&output), "");
+}
+
+// A dangling symlink to a source file is a walk error on a checkable file:
+// reported with the failed path first, and the path is not repeated inside
+// the message.
+#[cfg(unix)]
+#[test]
+fn check_reports_walk_errors_on_source_files_without_repeating_the_path() {
+    use std::os::unix::fs::symlink;
+
+    let dir = std::env::temp_dir().join(format!("ubiqlint-check-dangling-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::write(
+        dir.join("ubiqlint.yaml"),
+        "rules:\n  - id: domain-method\n    include: [\"src/**\"]\n    target: method\n    patterns:\n      - \"{verb}\"\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("terms.yaml"),
+        "context: order\nterms:\n  - name: Order\n    forms: { singular: order, plural: orders }\n    behaviors:\n      - verb: place\n        forms: { base: place, s: places, past: placed, pp: placed, ing: placing }\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("src/Order.java"),
+        "public class Order {\n    public void place() {\n    }\n}\n",
+    )
+    .unwrap();
+    symlink("nowhere", dir.join("src/Gone.java")).unwrap();
+
+    let config = dir.join("ubiqlint.yaml");
+    let output = ubiqlint(&["check", "--config", config.to_str().unwrap()]);
+    let _ = fs::remove_dir_all(&dir);
+
+    assert_eq!(output.status.code(), Some(1));
+    let out = stdout(&output);
+    let gone = dir.join("src/Gone.java");
+    assert!(
+        out.contains(&format!(
+            "{}: error: cannot walk: No such file or directory",
+            gone.display()
+        )),
+        "unexpected output: {out}"
+    );
+    assert!(
+        !out.contains("IO error for operation"),
+        "path repeated inside the message: {out}"
+    );
 }
 
 // Symlink loops and dangling links can only be created at test time.

@@ -1,3 +1,4 @@
+use std::error::Error as _;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -165,7 +166,7 @@ fn check(reporter: &mut Reporter, config_path: &Path, dictionary: Option<&Path>)
     };
 
     let checker = Checker::new(&dictionary, &config);
-    let excludes = config.excludes_matcher();
+    let excludes = config.excludes().clone();
     let mut checked = 0;
     for relative in collect_files(reporter, read_root, root, &excludes) {
         if reporter.broken() {
@@ -314,11 +315,15 @@ fn collect_files(
     files
 }
 
-/// Returns the core message of a walk error, without the path the `ignore`
-/// crate wraps around it.
+/// Returns the core message of a walk error, without the path wrappers:
+/// walkdir wraps its own error in an `io::Error` whose text repeats the
+/// path ("IO error for operation on ..."), so unwrap to the raw OS error.
 fn walk_error_message(error: &ignore::Error) -> String {
     match error {
-        ignore::Error::Io(io) => io.to_string(),
+        ignore::Error::Io(io) => io
+            .get_ref()
+            .and_then(|inner| inner.source())
+            .map_or_else(|| io.to_string(), ToString::to_string),
         ignore::Error::WithPath { err, .. }
         | ignore::Error::WithLineNumber { err, .. }
         | ignore::Error::WithDepth { err, .. } => walk_error_message(err),
