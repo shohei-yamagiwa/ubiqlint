@@ -2,10 +2,11 @@
 //!
 //! An identifier is split into words by [`identifier::split`] and matched
 //! against the patterns of every rule whose target and `include` globs apply
-//! to the symbol. A `{verb}` element is bound to the term of the `{noun}`
-//! element matched in the same identifier or, if there is none, to the term
+//! to the symbol. A `{verb}` element is currently bound to the term of the first
+//! `{noun}` element matched in the same identifier or, if there is none, to the term
 //! of the innermost enclosing type, and may then only use a form of one of
-//! that term's defined behaviors.
+//! that term's defined behaviors. The policy for identifiers with multiple
+//! nouns is provisional; see section 8 of `docs/plan.md`.
 
 use std::path::Path;
 
@@ -19,7 +20,6 @@ use crate::symbol::{Name, SymbolKind, Symbols};
 
 /// Checks symbols against rules, using one dictionary and one configuration.
 pub struct Checker<'a> {
-    dictionary: &'a Dictionary,
     config: &'a Config,
     matcher: Matcher<'a>,
 }
@@ -45,7 +45,6 @@ impl<'a> Checker<'a> {
     /// Creates a checker for `dictionary` and `config`.
     pub fn new(dictionary: &'a Dictionary, config: &'a Config) -> Self {
         Self {
-            dictionary,
             config,
             matcher: Matcher::new(dictionary, config),
         }
@@ -81,13 +80,11 @@ impl<'a> Checker<'a> {
             }
             // Anonymous classes are skipped, but an unknown named type
             // must not fall back to an outer type's term.
-            let enclosing_type = symbols.ancestors(symbol).find_map(|ancestor| {
-                ancestor
-                    .name
-                    .as_ref()
-                    .filter(|_| ancestor.kind == SymbolKind::Type)
-                    .map(|name| name.text.as_str())
-            });
+            let enclosing_type = symbols
+                .ancestors(symbol)
+                .filter(|ancestor| ancestor.kind == SymbolKind::Type)
+                .find_map(|ancestor| ancestor.name.as_ref())
+                .map(|name| name.text.as_str());
             let enclosing_term = enclosing_type.and_then(|name| {
                 let words = identifier::split(name);
                 self.matcher
@@ -113,25 +110,23 @@ impl<'a> Checker<'a> {
     /// Checks one symbol against one rule, returning the violation if the
     /// identifier matches none of the rule's patterns.
     fn check_symbol(&self, identifier: &Identifier, rule: &Rule) -> Option<Diagnostic> {
-        let message = if identifier.words.is_empty() {
+        let words = &identifier.words;
+        if !words.is_empty()
+            && rule.patterns.iter().any(|pattern| {
+                self.matcher
+                    .attempt(pattern, words, identifier.enclosing_term, MatchMode::Strict)
+                    .is_some()
+            })
+        {
+            return None;
+        }
+        let message = if words.is_empty() {
             // An identifier without words cannot match or become a term.
             format!(
                 "`{}` contains no words, so it cannot match any pattern of rule `{}`",
                 identifier.name.text, rule.id
             )
         } else {
-            if rule.patterns.iter().any(|pattern| {
-                self.matcher
-                    .attempt(
-                        pattern,
-                        &identifier.words,
-                        identifier.enclosing_term,
-                        MatchMode::Strict,
-                    )
-                    .is_some()
-            }) {
-                return None;
-            }
             self.describe(identifier, rule)
         };
         Some(Diagnostic {
@@ -178,7 +173,7 @@ impl<'a> Checker<'a> {
             (Some(term), Some((form, span))) => {
                 let verb_words = &words[span];
                 let verb = verb_words.join(" ");
-                let term_name = &self.dictionary.terms[term].name;
+                let term_name = &self.matcher.term(term).name;
                 if let Some(expected) = self.matcher.term_behavior_form(term, verb_words, form) {
                     format!(
                         "{prefix}: `{verb}` is a defined behavior of `{term_name}` in a \
@@ -208,7 +203,9 @@ impl<'a> Checker<'a> {
 
     /// Lists the behaviors defined for a term, for violation messages.
     fn defined_behaviors(&self, term: usize) -> String {
-        let behaviors: Vec<String> = self.dictionary.terms[term]
+        let behaviors: Vec<String> = self
+            .matcher
+            .term(term)
             .behaviors
             .iter()
             .map(|behavior| format!("`{}`", behavior.verb))
@@ -932,7 +929,10 @@ rules:
     }
 
     #[test]
-    fn binds_all_verbs_to_the_first_of_multiple_nouns() {
+    fn records_current_binding_of_verbs_to_the_first_of_multiple_nouns() {
+        // This records the current implementation, not a settled specification.
+        // The multiple-noun policy remains open in docs/plan.md section 8;
+        // update this regression test when that policy is decided.
         let (dictionary, _) = setup();
         let config = Config::from_yaml_str(
             r#"

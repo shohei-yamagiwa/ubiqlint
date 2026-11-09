@@ -4,38 +4,52 @@ use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 
 use crate::config::{Config, Vocabulary};
-use crate::dictionary::Dictionary;
+use crate::dictionary::{Dictionary, Term};
 use crate::pattern::{Element, NounForm, Pattern, VerbForm};
 use crate::words::Words;
 
-pub(super) struct Matcher<'a> {
+/// Matches word sequences using one dictionary and the configured vocabularies.
+pub(crate) struct Matcher<'a> {
+    /// The dictionary shared by lookups and diagnostic descriptions.
     dictionary: &'a Dictionary,
+    /// Configured word sequences, indexed by placeholder name.
     vocabularies: HashMap<&'a str, &'a Vocabulary>,
-    // Borrow the validated dictionary's words instead of cloning them into the index.
+    /// The term each singular form belongs to, borrowing the dictionary's words.
+    /// Dictionary validation keeps noun forms unique across terms, so one
+    /// index per form is enough; `or_insert` is not a conflict-resolution policy.
     singular: HashMap<&'a [String], usize>,
+    /// The corresponding index for plural forms, under the same uniqueness invariant.
     plural: HashMap<&'a [String], usize>,
-    // A relaxed verb can span multiple words only if they are a known form.
+    /// Every form of every behavior, borrowing the dictionary's words.
+    /// A relaxed verb can span multiple words only if they are a known form.
     verb_forms: HashSet<&'a [String]>,
 }
 
+/// Whether verb bindings must satisfy the dictionary or only suggest a diagnosis.
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum MatchMode {
+pub(crate) enum MatchMode {
+    /// Require every verb to be a defined behavior in the requested form.
     Strict,
+    /// Relax verb validation to describe the nearest pattern on failure.
     Relaxed,
 }
 
 /// What a placeholder of a pattern matched.
 enum Binding {
+    /// A noun placeholder and the dictionary term it matched.
     Noun { term: usize },
+    /// A verb placeholder, its requested form and its range of words.
     Verb { form: VerbForm, span: Range<usize> },
 }
 
+/// The placeholder bindings of one complete match, in pattern order.
 #[derive(Default)]
-pub(super) struct Bindings(Vec<Binding>);
+pub(crate) struct Bindings(Vec<Binding>);
 
 impl Bindings {
-    /// The first noun takes precedence over the enclosing type.
-    pub(super) fn bound_term(&self, enclosing: Option<usize>) -> Option<usize> {
+    /// Currently the first noun takes precedence over the enclosing type.
+    /// The multiple-noun policy remains provisional (see `docs/plan.md` section 8).
+    pub(crate) fn bound_term(&self, enclosing: Option<usize>) -> Option<usize> {
         self.0
             .iter()
             .find_map(|binding| match binding {
@@ -45,20 +59,23 @@ impl Bindings {
             .or(enclosing)
     }
 
-    pub(super) fn verbs(&self) -> impl Iterator<Item = (VerbForm, Range<usize>)> + '_ {
+    /// Returns verb forms and word ranges in pattern order.
+    pub(crate) fn verbs(&self) -> impl Iterator<Item = (VerbForm, Range<usize>)> + '_ {
         self.0.iter().filter_map(|binding| match binding {
             Binding::Verb { form, span } => Some((*form, span.clone())),
             Binding::Noun { .. } => None,
         })
     }
 
-    pub(super) fn verb_words(&self) -> usize {
+    /// Counts the words consumed by verbs to rank relaxed matches.
+    pub(crate) fn verb_words(&self) -> usize {
         self.verbs().map(|(_, span)| span.len()).sum()
     }
 }
 
 impl<'a> Matcher<'a> {
-    pub(super) fn new(dictionary: &'a Dictionary, config: &'a Config) -> Self {
+    /// Builds lookup indices over a validated dictionary and configuration.
+    pub(crate) fn new(dictionary: &'a Dictionary, config: &'a Config) -> Self {
         let vocabularies = config
             .vocabularies
             .iter()
@@ -91,7 +108,7 @@ impl<'a> Matcher<'a> {
 
     /// Returns the first complete match. Relaxed matching is used only to
     /// describe a violation, and still limits verbs to one word or a known form.
-    pub(super) fn attempt(
+    pub(crate) fn attempt(
         &self,
         pattern: &Pattern,
         words: &[String],
@@ -110,8 +127,13 @@ impl<'a> Matcher<'a> {
             .then_some(attempt.bindings)
     }
 
+    /// Returns the dictionary term used by both matching and diagnostics.
+    pub(crate) fn term(&self, index: usize) -> &Term {
+        &self.dictionary.terms[index]
+    }
+
     /// Returns the term whose singular or plural form is `words`.
-    pub(super) fn term_for_form(&self, form: NounForm, words: &[String]) -> Option<usize> {
+    pub(crate) fn term_for_form(&self, form: NounForm, words: &[String]) -> Option<usize> {
         match form {
             NounForm::Singular => self.singular.get(words).copied(),
             NounForm::Plural => self.plural.get(words).copied(),
@@ -120,7 +142,7 @@ impl<'a> Matcher<'a> {
 
     /// Returns the words of `form` of the behavior of `term` that `words`
     /// are a form of, if any: the form the pattern expects instead.
-    pub(super) fn term_behavior_form(
+    pub(crate) fn term_behavior_form(
         &self,
         term: usize,
         words: &[String],
@@ -134,7 +156,7 @@ impl<'a> Matcher<'a> {
     }
 
     /// Tells whether `words` are the given form of a behavior of `term`.
-    pub(super) fn term_allows(&self, term: usize, form: VerbForm, words: &[String]) -> bool {
+    pub(crate) fn term_allows(&self, term: usize, form: VerbForm, words: &[String]) -> bool {
         self.dictionary.terms[term]
             .behaviors
             .iter()
@@ -144,15 +166,15 @@ impl<'a> Matcher<'a> {
 
 /// State shared by all branches of one match. Keeping it here makes each
 /// recursive call carry only the remaining pattern and the word position.
-struct Attempt<'m, 'a, 'w> {
-    matcher: &'m Matcher<'a>,
-    words: &'w [String],
+struct Attempt<'a> {
+    matcher: &'a Matcher<'a>,
+    words: &'a [String],
     enclosing: Option<usize>,
     mode: MatchMode,
     bindings: Bindings,
 }
 
-impl Attempt<'_, '_, '_> {
+impl Attempt<'_> {
     /// Variable-length elements try each non-empty prefix and backtrack on failure.
     fn match_elements(&mut self, elements: &[Element], pos: usize) -> bool {
         let Some((first, rest)) = elements.split_first() else {
@@ -213,6 +235,7 @@ impl Attempt<'_, '_, '_> {
         }
     }
 
+    /// Checks every verb against its bound term, unless this is a relaxed match.
     fn verbs_allowed(&self) -> bool {
         if self.mode == MatchMode::Relaxed {
             return true;

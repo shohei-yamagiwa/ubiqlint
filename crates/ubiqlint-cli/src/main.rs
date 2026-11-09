@@ -191,7 +191,7 @@ fn check(reporter: &mut Reporter, config_path: &Path, dictionary: Option<&Path>)
         };
         checked += 1;
         let path = root.join(&relative);
-        let Some(source) = read_source(reporter, &path) else {
+        let Some(source) = read_file(reporter, &path) else {
             continue;
         };
         let diagnostics = match adapter.extract(&source) {
@@ -345,7 +345,7 @@ fn load<T>(
     path: &Path,
     parse: fn(&str) -> Result<T, Vec<Diagnostic>>,
 ) -> Option<T> {
-    let source = read_source(reporter, path)?;
+    let source = read_file(reporter, path)?;
     match parse(&source) {
         Ok(value) => Some(value),
         Err(diagnostics) => {
@@ -356,15 +356,17 @@ fn load<T>(
 }
 
 /// Reads input files using the same error format for definitions and source code.
-fn read_source(reporter: &mut Reporter, path: &Path) -> Option<String> {
-    fs::read_to_string(path)
-        .map_err(|error| {
+fn read_file(reporter: &mut Reporter, path: &Path) -> Option<String> {
+    match fs::read_to_string(path) {
+        Ok(source) => Some(source),
+        Err(error) => {
             reporter.problem(&format!(
                 "{}: error: cannot read the file: {error}",
                 path.display()
             ));
-        })
-        .ok()
+            None
+        }
+    }
 }
 
 /// Escapes control characters other than tabs, so that each problem stays on
