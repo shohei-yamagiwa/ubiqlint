@@ -1,0 +1,4 @@
+context: order
+terms:
+  - name: Order
+    forms: { singular: "order\nitem", plural: orders }

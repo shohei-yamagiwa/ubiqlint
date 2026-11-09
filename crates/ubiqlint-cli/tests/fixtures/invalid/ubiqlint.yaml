@@ -1,0 +1,6 @@
+rules:
+  - id: domain-type
+    include: ["src/main/java/**/domain/**"]
+    target: class
+    patterns:
+      - "{noun}{role}"

@@ -8,3 +8,5 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+globset.workspace = true
+saphyr.workspace = true

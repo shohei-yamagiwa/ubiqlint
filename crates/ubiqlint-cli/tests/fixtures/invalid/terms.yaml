@@ -1,0 +1,8 @@
+context: order
+terms:
+  - name: Order
+    forms: { singular: order, plural: orders }
+    forbidden_verbs: { delete: cancel }
+    behaviors:
+      - verb: place
+        forms: { base: place, s: places, past: placed }
