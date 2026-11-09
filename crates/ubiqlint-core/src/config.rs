@@ -25,6 +25,33 @@ pub struct Config {
     /// cannot get out of sync.
     exclude_globs: Vec<String>,
     exclude_set: GlobSet,
+    /// The prefixes of the `/**`-suffixed `exclude` globs, for pruning
+    /// directories during file collection.
+    exclude_dir_set: GlobSet,
+}
+
+/// Matches paths against `exclude`, for file collection.
+///
+/// `matches` applies the globs as written, to files. `matches_dir` prunes
+/// a directory only when a glob ends in `/**` and its prefix names the
+/// directory, so that a glob such as `src/*` never swallows `src/domain`.
+#[derive(Clone)]
+pub struct Excludes {
+    set: GlobSet,
+    dir_set: GlobSet,
+}
+
+impl Excludes {
+    /// Tells whether `path` is excluded, as written in `exclude`.
+    pub fn matches(&self, path: &Path) -> bool {
+        self.set.is_match(path)
+    }
+
+    /// Tells whether a directory should be pruned: a `/**`-suffixed glob's
+    /// prefix matches it.
+    pub fn matches_dir(&self, path: &Path) -> bool {
+        self.dir_set.is_match(path)
+    }
 }
 
 /// A named list of word sequences that patterns can refer to, such as
@@ -114,6 +141,14 @@ impl Config {
     pub fn excludes(&self, path: &Path) -> bool {
         self.exclude_set.is_match(path)
     }
+
+    /// Returns a clonable matcher for `exclude`, for file collection.
+    pub fn excludes_matcher(&self) -> Excludes {
+        Excludes {
+            set: self.exclude_set.clone(),
+            dir_set: self.exclude_dir_set.clone(),
+        }
+    }
 }
 
 impl Rule {
@@ -159,11 +194,23 @@ fn read_config(diags: &mut Diagnostics, node: &Node) -> Option<Config> {
     })
     .flatten()
     .unwrap_or_else(|| (Vec::new(), GlobSet::empty()));
+    // A directory is pruned only by the prefix of a `/**`-suffixed glob.
+    // Invalid globs were already reported by read_globs, so skip them here.
+    let mut dir_builder = GlobSetBuilder::new();
+    for glob in &exclude_globs {
+        if let Some(prefix) = glob.strip_suffix("/**") {
+            if let Ok(glob) = GlobBuilder::new(prefix).literal_separator(true).build() {
+                dir_builder.add(glob);
+            }
+        }
+    }
+    let exclude_dir_set = dir_builder.build().unwrap_or_else(|_| GlobSet::empty());
     Some(Config {
         vocabularies: vocabularies?.unwrap_or_default(),
         rules: rules?,
         exclude_globs,
         exclude_set,
+        exclude_dir_set,
     })
 }
 
@@ -618,6 +665,28 @@ rules:
         assert!(!config.excludes(Path::new("src/domain/Order.java")));
         // `legacy/**` does not match `legacy` itself, as in `include`.
         assert!(!config.excludes(Path::new("legacy")));
+    }
+
+    #[test]
+    fn exclude_never_prunes_a_directory_by_a_file_glob() {
+        let source = r#"
+exclude: ["src/*", "legacy/**"]
+rules:
+  - id: domain-type
+    include: ["**/domain/**"]
+    target: type
+    patterns: ["{noun}"]
+"#;
+        let config = Config::from_yaml_str(source).unwrap();
+        let excludes = config.excludes_matcher();
+        // `src/*` matches files, but not the directory `src/domain`.
+        assert!(excludes.matches(Path::new("src/Main.java")));
+        assert!(!excludes.matches(Path::new("src/domain/Order.java")));
+        assert!(!excludes.matches_dir(Path::new("src/domain")));
+        // `legacy/**` prunes the directory `legacy` itself.
+        assert!(excludes.matches(Path::new("legacy/Old.java")));
+        assert!(excludes.matches_dir(Path::new("legacy")));
+        assert!(!excludes.matches_dir(Path::new("src")));
     }
 
     #[test]

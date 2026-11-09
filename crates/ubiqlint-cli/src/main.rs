@@ -6,7 +6,7 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 use ignore::WalkBuilder;
 use ubiqlint_core::{
-    CONFIG_FILE_NAME, Checker, Config, DICTIONARY_FILE_NAME, Diagnostic, Dictionary,
+    CONFIG_FILE_NAME, Checker, Config, DICTIONARY_FILE_NAME, Diagnostic, Dictionary, Excludes,
     LanguageAdapter,
 };
 use ubiqlint_java::JavaAdapter;
@@ -94,6 +94,12 @@ impl Reporter {
         self.line(text);
     }
 
+    /// Prints a warning to stderr. Warnings never fail the run and do not
+    /// mix into the `path:line:column: error:` lines on stdout.
+    fn warn(&mut self, text: &str) {
+        let _ = writeln!(io::stderr(), "{text}");
+    }
+
     /// Tells whether the pipe is broken, so callers can stop early instead
     /// of doing a whole run's work into a closed pipe.
     fn broken(&self) -> bool {
@@ -159,23 +165,16 @@ fn check(reporter: &mut Reporter, config_path: &Path, dictionary: Option<&Path>)
     };
 
     let checker = Checker::new(&dictionary, &config);
+    let excludes = config.excludes_matcher();
     let mut checked = 0;
-    for relative in collect_files(reporter, read_root, root, &config) {
+    for relative in collect_files(reporter, read_root, root, &excludes) {
         if reporter.broken() {
             break;
         }
-        if config.excludes(&relative) {
+        if excludes.matches(&relative) {
             continue;
         }
-        let extension = relative
-            .extension()
-            .and_then(|extension| extension.to_str());
-        let Some(adapter) = extension.and_then(|extension| {
-            ADAPTERS
-                .iter()
-                .find(|adapter| adapter.extensions().contains(&extension))
-                .copied()
-        }) else {
+        let Some(adapter) = adapter_for(&relative) else {
             continue;
         };
         checked += 1;
@@ -210,9 +209,19 @@ fn check(reporter: &mut Reporter, config_path: &Path, dictionary: Option<&Path>)
     }
     if checked == 0 {
         // Distinguish "no violations" from "nothing was checked", which CI
-        // and hooks would otherwise not see.
-        reporter.line("warning: no source files were checked");
+        // and hooks would otherwise not see. Warnings go to stderr and never
+        // fail the run; only problems do.
+        reporter.warn("warning: no source files were checked");
     }
+}
+
+/// Returns the adapter that handles `path`'s extension, if any.
+fn adapter_for(path: &Path) -> Option<&'static dyn LanguageAdapter> {
+    let extension = path.extension()?.to_str()?;
+    ADAPTERS
+        .iter()
+        .find(|adapter| adapter.extensions().contains(&extension))
+        .copied()
 }
 
 /// Collects the paths of all files under `read_root`, relative to it and
@@ -220,8 +229,12 @@ fn check(reporter: &mut Reporter, config_path: &Path, dictionary: Option<&Path>)
 /// `.ignore`, `.git/info/exclude`) are respected with git's own boundary:
 /// inside a repository, `.gitignore` files above it do not apply; outside
 /// one (a tarball), only the ones inside the tree do. Hidden files such as
-/// `.git` are skipped, symlinks are followed, and directories the
-/// configuration `exclude`s are never descended into.
+/// `.git` are skipped, symlinks are followed, and directories named by a
+/// `/**`-suffixed `exclude` glob are never descended into.
+///
+/// `exclude` globs apply to files as written; they never prune a directory
+/// by matching its name, so `exclude: ["src/*"]` does not swallow
+/// `src/domain`.
 ///
 /// Walk errors are reported with the failed path first, since silently
 /// skipping a directory would hide violations. Errors under an excluded
@@ -231,7 +244,7 @@ fn collect_files(
     reporter: &mut Reporter,
     read_root: &Path,
     root: &Path,
-    config: &Config,
+    excludes: &Excludes,
 ) -> Vec<PathBuf> {
     let in_repo = read_root.canonicalize().is_ok_and(|dir| {
         dir.ancestors()
@@ -243,13 +256,20 @@ fn collect_files(
         .require_git(in_repo)
         .parents(in_repo);
     let filter_root = read_root.to_path_buf();
-    let filter_config = config.clone();
+    let filter_excludes = excludes.clone();
     builder.filter_entry(move |entry| {
         let relative = entry
             .path()
             .strip_prefix(&filter_root)
             .unwrap_or(entry.path());
-        !filter_config.excludes(relative)
+        if entry
+            .file_type()
+            .is_some_and(|file_type| file_type.is_dir())
+        {
+            !filter_excludes.matches_dir(relative)
+        } else {
+            !filter_excludes.matches(relative)
+        }
     });
     let mut files = Vec::new();
     for entry in builder.build() {
@@ -261,30 +281,24 @@ fn collect_files(
             Err(error) => {
                 if let Some(path) = error_path(&error) {
                     let relative = path.strip_prefix(read_root).unwrap_or(path);
-                    if config.excludes(relative) {
+                    if excludes.matches(relative) {
                         continue;
                     }
-                    let is_source = path
-                        .extension()
-                        .and_then(|extension| extension.to_str())
-                        .is_some_and(|extension| {
-                            ADAPTERS
-                                .iter()
-                                .any(|adapter| adapter.extensions().contains(&extension))
-                        });
                     // A directory that cannot be read may hide violations;
                     // a file that no adapter handles is not ours to check.
-                    if !path.is_dir() && !is_source {
+                    if !path.is_dir() && adapter_for(path).is_none() {
                         continue;
                     }
                     reporter.problem(&format!(
-                        "{}: error: cannot walk: {error}",
-                        root.join(relative).display()
+                        "{}: error: cannot walk: {}",
+                        root.join(relative).display(),
+                        walk_error_message(&error)
                     ));
                 } else {
                     reporter.problem(&format!(
-                        "{}: error: cannot walk: {error}",
-                        read_root.display()
+                        "{}: error: cannot walk: {}",
+                        read_root.display(),
+                        walk_error_message(&error)
                     ));
                 }
                 continue;
@@ -298,6 +312,21 @@ fn collect_files(
     }
     files.sort();
     files
+}
+
+/// Returns the core message of a walk error, without the path the `ignore`
+/// crate wraps around it.
+fn walk_error_message(error: &ignore::Error) -> String {
+    match error {
+        ignore::Error::Io(io) => io.to_string(),
+        ignore::Error::WithPath { err, .. }
+        | ignore::Error::WithLineNumber { err, .. }
+        | ignore::Error::WithDepth { err, .. } => walk_error_message(err),
+        ignore::Error::Partial(errors) => errors
+            .first()
+            .map_or_else(|| error.to_string(), walk_error_message),
+        other => other.to_string(),
+    }
 }
 
 /// Returns the path an `ignore::Error` is about, if it has one.

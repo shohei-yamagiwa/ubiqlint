@@ -14,6 +14,10 @@ fn stdout(output: &Output) -> String {
     String::from_utf8(output.stdout.clone()).expect("stdout is not UTF-8")
 }
 
+fn stderr(output: &Output) -> String {
+    String::from_utf8(output.stderr.clone()).expect("stderr is not UTF-8")
+}
+
 #[test]
 fn prints_version() {
     let output = ubiqlint(&["--version"]);
@@ -225,6 +229,25 @@ fn check_never_reads_files_matched_by_exclude() {
 }
 
 #[test]
+fn check_exclude_file_glob_does_not_swallow_directories() {
+    // `src/*` excludes `src/Main.java`, but must not prune the directory
+    // `src/domain`, so `src/domain/Bad.java` is still checked.
+    let output = ubiqlint(&[
+        "check",
+        "--config",
+        "tests/fixtures/check/exclude-glob/ubiqlint.yaml",
+    ]);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        stdout(&output),
+        "tests/fixtures/check/exclude-glob/src/domain/Bad.java:2:17: error: `update` does not \
+         match pattern `{verb}` of rule `domain-method`: `{verb}` is not bound to a term: the \
+         enclosing type `Bad` is not in the dictionary\n"
+    );
+}
+
+#[test]
 fn check_respects_gitignore() {
     // The fixture has no `.git` directory, so this also covers sources
     // distributed as a tarball.
@@ -308,8 +331,86 @@ fn check_warns_when_no_source_files_were_checked() {
         "tests/fixtures/check/nofiles/ubiqlint.yaml",
     ]);
 
+    // Warnings go to stderr and never fail the run.
     assert!(output.status.success());
-    assert_eq!(stdout(&output), "warning: no source files were checked\n");
+    assert_eq!(stdout(&output), "");
+    assert_eq!(stderr(&output), "warning: no source files were checked\n");
+}
+
+/// Writes a minimal project: a valid `Order.java` under `src/`, plus a
+/// violating `Bad.java` under `ignored/`, and a `.gitignore` for `ignored/`.
+fn write_project_with_gitignore(dir: &std::path::Path) {
+    fs::create_dir_all(dir.join("src/ignored")).unwrap();
+    fs::write(
+        dir.join("ubiqlint.yaml"),
+        "rules:\n  - id: domain-method\n    include: [\"src/**\"]\n    target: method\n    patterns:\n      - \"{verb}\"\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("terms.yaml"),
+        "context: order\nterms:\n  - name: Order\n    forms: { singular: order, plural: orders }\n    behaviors:\n      - verb: place\n        forms: { base: place, s: places, past: placed, pp: placed, ing: placing }\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("src/Order.java"),
+        "public class Order {\n    public void place() {\n    }\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("src/ignored/Bad.java"),
+        "public class Bad {\n    public void update() {\n    }\n}\n",
+    )
+    .unwrap();
+    fs::write(dir.join(".gitignore"), "ignored/\n").unwrap();
+}
+
+// Outside a git repository (a tarball), the tree's own `.gitignore`
+// applies. The temp dir is normally outside any repository.
+#[test]
+fn check_applies_gitignore_outside_a_repository() {
+    let dir =
+        std::env::temp_dir().join(format!("ubiqlint-gitignore-tarball-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    write_project_with_gitignore(&dir);
+
+    let config = dir.join("ubiqlint.yaml");
+    let output = ubiqlint(&["check", "--config", config.to_str().unwrap()]);
+    let _ = fs::remove_dir_all(&dir);
+
+    assert!(
+        output.status.success(),
+        "unexpected output: {} / {}",
+        stdout(&output),
+        stderr(&output)
+    );
+    assert_eq!(stdout(&output), "");
+}
+
+// A `.gitignore` above the repository (e.g. `*` in a parent directory) must
+// not apply to files inside a project that has its own `.git`.
+#[test]
+fn check_ignores_gitignore_above_the_repository() {
+    let base =
+        std::env::temp_dir().join(format!("ubiqlint-gitignore-parent-{}", std::process::id()));
+    let dir = base.join("proj");
+    let _ = fs::remove_dir_all(&base);
+    write_project_with_gitignore(&dir);
+    fs::create_dir_all(dir.join(".git")).unwrap();
+    fs::write(base.join(".gitignore"), "*\n").unwrap();
+
+    let config = dir.join("ubiqlint.yaml");
+    let output = ubiqlint(&["check", "--config", config.to_str().unwrap()]);
+    let _ = fs::remove_dir_all(&base);
+
+    // `src/Order.java` is still checked, so no warning and no violations.
+    assert!(
+        output.status.success(),
+        "unexpected output: {} / {}",
+        stdout(&output),
+        stderr(&output)
+    );
+    assert_eq!(stdout(&output), "");
+    assert_eq!(stderr(&output), "");
 }
 
 // Symlink loops and dangling links can only be created at test time.

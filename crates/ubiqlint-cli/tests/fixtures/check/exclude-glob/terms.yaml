@@ -1,0 +1,8 @@
+context: order
+terms:
+  - name: Order
+    kind: entity
+    forms: { singular: order, plural: orders }
+    behaviors:
+      - verb: place
+        forms: { base: place, s: places, past: placed, pp: placed, ing: placing }

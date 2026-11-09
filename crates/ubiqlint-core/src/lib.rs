@@ -19,7 +19,7 @@ pub mod words;
 mod yaml;
 
 pub use check::Checker;
-pub use config::{CONFIG_FILE_NAME, Config, Rule, Target, Vocabulary};
+pub use config::{CONFIG_FILE_NAME, Config, Excludes, Rule, Target, Vocabulary};
 pub use diagnostic::Diagnostic;
 pub use dictionary::{Behavior, DICTIONARY_FILE_NAME, Dictionary, NounForms, Term, VerbForms};
 pub use location::{LineIndex, Location, Span};
