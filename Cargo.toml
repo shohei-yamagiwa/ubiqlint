@@ -13,3 +13,5 @@ repository = "https://github.com/shohei-yamagiwa/ubiqlint"
 ubiqlint-core = { path = "crates/ubiqlint-core" }
 ubiqlint-java = { path = "crates/ubiqlint-java" }
 clap = { version = "4", features = ["derive"] }
+globset = "0.4"
+saphyr = "0.3.3"

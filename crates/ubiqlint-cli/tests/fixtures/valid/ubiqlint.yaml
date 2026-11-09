@@ -1,0 +1,18 @@
+vocabularies:
+  role: [repository, factory, policy]
+
+rules:
+  - id: domain-type
+    include: ["src/main/java/**/domain/**"]
+    target: type
+    patterns:
+      - "{noun}"
+      - "{noun}{role}"
+      - "{noun}{verb:pp}"
+
+  - id: domain-method
+    include: ["src/main/java/**/domain/**"]
+    target: method
+    patterns:
+      - "{verb}"
+      - "{verb}{noun}"
