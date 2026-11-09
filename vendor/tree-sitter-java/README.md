@@ -1,14 +1,13 @@
 # tree-sitter-java (patched for ubiqlint)
 
-This is [tree-sitter-java](https://github.com/tree-sitter/tree-sitter-java)
-0.23.5, the latest release on crates.io, with one change to `grammar.js`.
-The upstream `master` branch has the same grammar as 0.23.5.
+This directory vendors [tree-sitter-java](https://github.com/tree-sitter/tree-sitter-java)
+0.23.5 with a patch to `grammar.js` for ubiqlint.
 
 ## Patch
 
 Java allows modifiers in type patterns and record pattern components
-(JLS 14.30.1), but the upstream grammar does not, so these are syntax errors
-there:
+(JLS 14.30.1), but the grammar in upstream version 0.23.5 does not, so these
+are syntax errors in that version:
 
 ```java
 case final String s -> 1;

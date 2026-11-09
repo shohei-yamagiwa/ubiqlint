@@ -20,7 +20,7 @@ pub struct SourceFile {
 ///
 /// This model currently covers unaliased imports, as used by Java. Before
 /// adding languages with aliases or other module specifiers, the local name
-/// and source representation need a separate design; see `docs/plan.md` §8.
+/// and source representation need a separate design.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Import {
     pub path: Vec<String>,

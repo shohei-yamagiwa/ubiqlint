@@ -48,7 +48,7 @@ pub(crate) struct Bindings(Vec<Binding>);
 
 impl Bindings {
     /// Currently the first noun takes precedence over the enclosing type.
-    /// The multiple-noun policy remains provisional (see `docs/plan.md` section 8).
+    /// The multiple-noun policy remains provisional.
     pub(crate) fn bound_term(&self, enclosing: Option<usize>) -> Option<usize> {
         self.0
             .iter()

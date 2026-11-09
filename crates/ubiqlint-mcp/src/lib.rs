@@ -3,8 +3,7 @@
 //! [`serve_stdio`] serves one project, the directory of a configuration
 //! file, over standard input and output. Its tools give the dictionary and
 //! the rules that apply to a file, check source code, and edit dictionaries
-//! the way `ubiqlint term` and `ubiqlint behavior` do. See section 6.2 of
-//! `docs/plan.md`.
+//! the way `ubiqlint term` and `ubiqlint behavior` do.
 //!
 //! The server keeps no state between calls: each call reads the
 //! configuration and the dictionaries again, so it always answers for the
