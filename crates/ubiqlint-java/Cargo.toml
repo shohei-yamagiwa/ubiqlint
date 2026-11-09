@@ -1,0 +1,11 @@
+[package]
+name = "ubiqlint-java"
+description = "Java language adapter for ubiqlint"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ubiqlint-core.workspace = true

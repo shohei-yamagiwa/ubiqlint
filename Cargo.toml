@@ -1,0 +1,15 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+repository = "https://github.com/shohei-yamagiwa/ubiqlint"
+
+[workspace.dependencies]
+ubiqlint-core = { path = "crates/ubiqlint-core" }
+ubiqlint-java = { path = "crates/ubiqlint-java" }
+clap = { version = "4", features = ["derive"] }
