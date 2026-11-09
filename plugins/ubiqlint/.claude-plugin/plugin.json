@@ -1,0 +1,10 @@
+{
+  "name": "ubiqlint",
+  "version": "0.1.0",
+  "description": "Java naming and import boundary diagnostics using the project's ubiqlint dictionary and rules",
+  "author": {
+    "name": "shohei-yamagiwa"
+  },
+  "repository": "https://github.com/shohei-yamagiwa/ubiqlint",
+  "license": "MIT"
+}

@@ -1,0 +1,17 @@
+[package]
+name = "ubiqlint-lsp"
+description = "Diagnostic Language Server Protocol server for ubiqlint"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+lsp-server.workspace = true
+lsp-types.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+ubiqlint-core.workspace = true
+ubiqlint-project.workspace = true
+url.workspace = true

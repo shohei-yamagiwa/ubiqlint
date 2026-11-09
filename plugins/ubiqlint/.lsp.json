@@ -1,0 +1,9 @@
+{
+  "ubiqlint": {
+    "command": "ubiqlint",
+    "args": ["lsp"],
+    "extensionToLanguage": {
+      ".java": "java"
+    }
+  }
+}

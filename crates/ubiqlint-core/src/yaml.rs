@@ -15,10 +15,7 @@ pub(crate) struct Diagnostics(Vec<Diagnostic>);
 
 impl Diagnostics {
     pub(crate) fn error(&mut self, location: Location, message: impl Into<String>) {
-        self.0.push(Diagnostic {
-            location,
-            message: message.into(),
-        });
+        self.0.push(Diagnostic::new(location, message));
     }
 
     /// Returns `value` if no problem was reported, or every problem sorted by
@@ -49,21 +46,21 @@ pub(crate) fn location(node: &Node) -> Location {
 /// Parses `source` as exactly one YAML document.
 pub(crate) fn parse_document(source: &str) -> Result<Node<'_>, Vec<Diagnostic>> {
     let mut documents = MarkedYaml::load_from_str(source).map_err(|error| {
-        vec![Diagnostic {
-            location: marker_location(error.marker()),
-            message: format!("invalid YAML: {}", error.info()),
-        }]
+        vec![Diagnostic::new(
+            marker_location(error.marker()),
+            format!("invalid YAML: {}", error.info()),
+        )]
     })?;
     match documents.len() {
-        0 => Err(vec![Diagnostic {
-            location: Location { line: 1, column: 1 },
-            message: "the file contains no YAML document".to_owned(),
-        }]),
+        0 => Err(vec![Diagnostic::new(
+            Location { line: 1, column: 1 },
+            "the file contains no YAML document",
+        )]),
         1 => Ok(documents.remove(0)),
-        count => Err(vec![Diagnostic {
-            location: location(&documents[1]),
-            message: format!("expected a single YAML document, found {count}"),
-        }]),
+        count => Err(vec![Diagnostic::new(
+            location(&documents[1]),
+            format!("expected a single YAML document, found {count}"),
+        )]),
     }
 }
 

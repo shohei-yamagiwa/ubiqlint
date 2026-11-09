@@ -1,0 +1,16 @@
+{
+  "name": "ubiqlint",
+  "owner": {
+    "name": "shohei-yamagiwa"
+  },
+  "metadata": {
+    "description": "Java ubiquitous language diagnostics for coding agents"
+  },
+  "plugins": [
+    {
+      "name": "ubiqlint",
+      "source": "./plugins/ubiqlint",
+      "description": "Ubiquitous language naming and import boundary diagnostics for Java"
+    }
+  ]
+}
