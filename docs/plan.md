@@ -153,7 +153,7 @@ rules:
 | `rules` | ○ | ルールのリスト |
 | `rules[].id` | ○ | ルールの識別子。違反メッセージに含める。小文字の英数字をハイフンでつなぐ（例: `domain-method`）。重複は不可 |
 | `rules[].include` | ○ | ルールを適用するパス（glob）のリスト。設定ファイルのあるディレクトリからの相対パスとして照合する。`*` はディレクトリの区切りをまたがず、またぐには `**` を使う |
-| `rules[].target` | ○ | 対象とする識別子の種類。`type`（クラス・インターフェース・enum・record など）、`method`、`field`、`parameter`、`variable`（ローカル変数）のいずれか |
+| `rules[].target` | ○ | 対象とする識別子の種類。`type`（クラス・インターフェース・enum・record など）、`method`、`field`（enum 定数と record コンポーネントを含む）、`parameter`、`variable`（ローカル変数）のいずれか |
 | `rules[].patterns` | ○ | 許可するパターンのリスト。どれか 1 つに一致すればよい |
 
 `target` には、特定の言語に依存しないよう `class` ではなく `type` を使います。

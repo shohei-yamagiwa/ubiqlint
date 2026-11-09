@@ -80,41 +80,64 @@ impl<'a> Checker<'a> {
     /// `path`, given relative to the directory of the configuration file.
     ///
     /// A symbol must match at least one pattern of every rule whose target
-    /// and `include` globs apply to it.
+    /// and `include` globs apply to it. The diagnostics are sorted by
+    /// location, since symbols are registered in parse order, which is not
+    /// always source order.
     pub fn check(&self, symbols: &Symbols, path: &Path) -> Vec<Diagnostic> {
+        // Match the path against the globs once per file, not once per
+        // symbol and rule.
+        let applicable: Vec<&Rule> = self
+            .config
+            .rules
+            .iter()
+            .filter(|rule| rule.includes(path))
+            .collect();
         let mut diagnostics = Vec::new();
         for symbol in symbols.iter() {
-            if symbol.name.is_none() {
+            let Some(name) = &symbol.name else {
+                continue;
+            };
+            let rules: Vec<&&Rule> = applicable
+                .iter()
+                .filter(|rule| rule.target.matches(symbol.kind))
+                .collect();
+            if rules.is_empty() {
                 continue;
             }
-            for rule in &self.config.rules {
-                if rule.target.matches(symbol.kind) && rule.includes(path) {
-                    if let Some(diagnostic) = self.check_symbol(symbols, symbol, rule) {
-                        diagnostics.push(diagnostic);
-                    }
+            // Split the identifier and find the enclosing term once per
+            // symbol, not once per rule. An identifier that splits into no
+            // words, such as `__`, can match no pattern at all, so it is a
+            // violation whenever a rule applies.
+            let words = identifier::split(&name.text);
+            let enclosing = self.enclosing_term(symbols, symbol);
+            for rule in rules {
+                if let Some(diagnostic) =
+                    self.check_symbol(symbols, symbol, rule, &words, enclosing)
+                {
+                    diagnostics.push(diagnostic);
                 }
             }
         }
+        diagnostics.sort_by_key(|diagnostic| diagnostic.location);
         diagnostics
     }
 
     /// Checks one symbol against one rule, returning the violation if the
     /// identifier matches none of the rule's patterns.
-    fn check_symbol(&self, symbols: &Symbols, symbol: &Symbol, rule: &Rule) -> Option<Diagnostic> {
-        let name = symbol
-            .name
-            .as_ref()
-            .expect("only named symbols are checked");
-        // An identifier that splits into no words, such as `__`, can match
-        // no pattern at all, so it is a violation whenever a rule applies.
-        let words = identifier::split(&name.text);
-        let enclosing = self.enclosing_term(symbols, symbol);
+    fn check_symbol(
+        &self,
+        symbols: &Symbols,
+        symbol: &Symbol,
+        rule: &Rule,
+        words: &[String],
+        enclosing: Option<usize>,
+    ) -> Option<Diagnostic> {
         for pattern in &rule.patterns {
-            if self.attempt(pattern, &words, enclosing, false).is_some() {
+            if self.attempt(pattern, words, enclosing, false).is_some() {
                 return None;
             }
         }
-        Some(self.describe(symbols, symbol, rule, &words, enclosing))
+        Some(self.describe(symbols, symbol, rule, words, enclosing))
     }
 
     /// Builds the violation for an identifier that matched no pattern,
@@ -358,7 +381,9 @@ impl<'a> Checker<'a> {
         })
     }
 
-    /// Returns the term the `{verb}` elements are bound to.
+    /// Returns the term the `{verb}` elements are bound to: the term of the
+    /// first `{noun}` matched in the same identifier or, if there is none,
+    /// of the innermost enclosing named type.
     fn bound_term(&self, bindings: &[Binding], enclosing: Option<usize>) -> Option<usize> {
         bindings
             .iter()
@@ -442,6 +467,10 @@ impl<'a> Checker<'a> {
     }
 
     /// Returns the innermost enclosing type with a name.
+    ///
+    /// Anonymous classes are skipped, named types are not: a method of a
+    /// named `Order.Builder` is bound to `Builder`, and reported as unbound
+    /// when `Builder` is not a term of the dictionary.
     fn enclosing_type<'s>(&self, symbols: &'s Symbols, symbol: &'s Symbol) -> Option<&'s Symbol> {
         symbols
             .ancestors(symbol)
@@ -944,6 +973,78 @@ rules:
              expected one of `{noun:plural}`. \
              If `__` is a new term or behavior of the ubiquitous language, \
              define it in `terms.yaml` first"
+        );
+    }
+
+    #[test]
+    fn sorts_diagnostics_by_location() {
+        let (dictionary, config) = setup();
+        let checker = Checker::new(&dictionary, &config);
+        // Registered out of source order: line 10 before line 4.
+        let symbols = order_class(&[
+            (SymbolKind::Method, "updateOrder", 10),
+            (SymbolKind::Method, "update", 4),
+        ]);
+
+        let diagnostics = checker.check(&symbols, Path::new(DOMAIN));
+        let lines: Vec<usize> = diagnostics.iter().map(|d| d.location.line).collect();
+        assert_eq!(lines, [4, 10]);
+    }
+
+    #[test]
+    fn skips_anonymous_classes_when_binding_the_enclosing_type() {
+        let (dictionary, config) = setup();
+        let checker = Checker::new(&dictionary, &config);
+        let mut symbols = Symbols::new();
+        let order = symbols.push(SymbolKind::Type, name("Order", 1, 13), span(1, 13), None);
+        let anonymous = symbols.push(SymbolKind::Type, None, span(3, 20), Some(order));
+        symbols.push(
+            SymbolKind::Method,
+            name("update", 5, 17),
+            span(5, 17),
+            Some(anonymous),
+        );
+
+        let diagnostics = checker.check(&symbols, Path::new(DOMAIN));
+        assert_eq!(
+            messages(&diagnostics),
+            [
+                "`update` does not match pattern `{verb}` of rule `domain-method`: \
+              `update` is not a defined behavior of `Order` (defined behaviors: `place`, `cancel`)"
+            ]
+        );
+    }
+
+    #[test]
+    fn does_not_skip_a_named_type_that_is_not_a_term() {
+        let (dictionary, config) = setup();
+        let checker = Checker::new(&dictionary, &config);
+        let mut symbols = Symbols::new();
+        let order = symbols.push(SymbolKind::Type, name("Order", 1, 13), span(1, 13), None);
+        let builder = symbols.push(
+            SymbolKind::Type,
+            name("Builder", 10, 20),
+            span(10, 20),
+            Some(order),
+        );
+        symbols.push(
+            SymbolKind::Method,
+            name("place", 11, 17),
+            span(11, 17),
+            Some(builder),
+        );
+
+        let diagnostics = checker.check(&symbols, Path::new(DOMAIN));
+        assert_eq!(
+            messages(&diagnostics),
+            [
+                "`Builder` does not match any pattern of rule `domain-type`: \
+                 expected one of `{noun}`, `{noun}{role}`, `{noun}{verb:pp}`. \
+                 If `Builder` is a new term or behavior of the ubiquitous language, \
+                 define it in `terms.yaml` first",
+                "`place` does not match pattern `{verb}` of rule `domain-method`: `{verb}` is \
+                 not bound to a term: the enclosing type `Builder` is not in the dictionary",
+            ]
         );
     }
 }
