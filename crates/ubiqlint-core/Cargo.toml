@@ -1,0 +1,10 @@
+[package]
+name = "ubiqlint-core"
+description = "Language-agnostic core of ubiqlint: dictionary and config loading, identifier splitting, pattern matching and diagnostics"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]

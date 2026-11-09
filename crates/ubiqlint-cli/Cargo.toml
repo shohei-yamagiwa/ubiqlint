@@ -1,0 +1,17 @@
+[package]
+name = "ubiqlint-cli"
+description = "Command-line interface for ubiqlint, a linter for a ubiquitous language"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "ubiqlint"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+ubiqlint-core.workspace = true
+ubiqlint-java.workspace = true
