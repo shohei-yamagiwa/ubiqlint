@@ -451,28 +451,50 @@ fn edit_dictionary(reporter: &mut Reporter, path: &Path, request: &EditRequest) 
 /// Replaces the contents of the file at `path` all at once: the text is
 /// written to a temporary file next to it, which then takes its place. A
 /// failure midway leaves the old file untouched. A symlink keeps pointing
-/// to the same file, which keeps its permissions.
+/// to the same file, which keeps its permissions. If something already
+/// exists at the temporary path, nothing is written and it is left alone.
 fn replace_file(path: &Path, contents: &str) -> io::Result<()> {
     let target = fs::canonicalize(path)?;
     let permissions = fs::metadata(&target)?.permissions();
-    let name = target
-        .file_name()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "not a file"))?;
-    let mut temporary_name = std::ffi::OsString::from(".");
-    temporary_name.push(name);
-    temporary_name.push(format!(".ubiqlint-{}.tmp", std::process::id()));
-    let temporary = target.with_file_name(temporary_name);
+    let temporary = temporary_path(&target)?;
+    // Create the file only if nothing is there: an existing path, perhaps
+    // a symlink to an unrelated file, must not be written through.
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)
+        .map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!(
+                    "cannot create the temporary file `{}`: {error}",
+                    temporary.display()
+                ),
+            )
+        })?;
     let written = (|| {
-        let mut file = fs::File::create(&temporary)?;
         file.write_all(contents.as_bytes())?;
+        file.set_permissions(permissions)?;
         file.sync_all()?;
-        fs::set_permissions(&temporary, permissions)?;
         fs::rename(&temporary, &target)
     })();
+    // Only the file created above is cleaned up.
     if written.is_err() {
         let _ = fs::remove_file(&temporary);
     }
     written
+}
+
+/// The temporary file `replace_file` writes before replacing `target`: a
+/// hidden file next to it, named after it and this process.
+fn temporary_path(target: &Path) -> io::Result<PathBuf> {
+    let name = target
+        .file_name()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "not a file"))?;
+    let mut temporary = std::ffi::OsString::from(".");
+    temporary.push(name);
+    temporary.push(format!(".ubiqlint-{}.tmp", std::process::id()));
+    Ok(target.with_file_name(temporary))
 }
 
 /// Prints problems to stdout, one per line. Rust ignores SIGPIPE, so a
@@ -914,4 +936,52 @@ fn single_line(text: &str) -> String {
         }
     }
     line
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A file already at the temporary path is neither written through
+    /// (it may be a symlink to an unrelated file) nor removed, and the
+    /// dictionary stays as it was.
+    #[test]
+    fn replace_file_leaves_an_existing_temporary_path_alone() {
+        let directory =
+            std::env::temp_dir().join(format!("ubiqlint-replace-file-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&directory);
+        fs::create_dir_all(&directory).unwrap();
+        let dictionary = directory.join("terms.yaml");
+        fs::write(&dictionary, "old").unwrap();
+        let temporary = temporary_path(&fs::canonicalize(&dictionary).unwrap()).unwrap();
+
+        fs::write(&temporary, "someone else's").unwrap();
+        assert!(replace_file(&dictionary, "new").is_err());
+        assert_eq!(fs::read_to_string(&temporary).unwrap(), "someone else's");
+        assert_eq!(fs::read_to_string(&dictionary).unwrap(), "old");
+
+        #[cfg(unix)]
+        {
+            let unrelated = directory.join("unrelated.txt");
+            fs::write(&unrelated, "unrelated").unwrap();
+            fs::remove_file(&temporary).unwrap();
+            std::os::unix::fs::symlink(&unrelated, &temporary).unwrap();
+            assert!(replace_file(&dictionary, "new").is_err());
+            assert_eq!(fs::read_to_string(&unrelated).unwrap(), "unrelated");
+            assert!(
+                fs::symlink_metadata(&temporary)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink()
+            );
+            assert!(
+                fs::symlink_metadata(&dictionary)
+                    .unwrap()
+                    .file_type()
+                    .is_file()
+            );
+            assert_eq!(fs::read_to_string(&dictionary).unwrap(), "old");
+        }
+        fs::remove_dir_all(&directory).unwrap();
+    }
 }
