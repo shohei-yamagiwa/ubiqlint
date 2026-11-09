@@ -127,7 +127,7 @@ fn check_reports_every_violation_with_its_location() {
         "\
 tests/fixtures/check/bad/src/main/java/com/example/order/domain/Broken.java:3:22: error: syntax error: missing `}`
 tests/fixtures/check/bad/src/main/java/com/example/order/domain/Order.java:7:17: error: `updateOrder` does not match pattern `{verb}{noun}` of rule `domain-method`: `update` is not a defined behavior of `Order` (defined behaviors: `place`, `cancel`)
-tests/fixtures/check/bad/src/main/java/com/example/order/domain/PurchaseService.java:3:14: error: `PurchaseService` does not match any pattern of rule `domain-type`: expected one of `{noun}`, `{noun}{role}`, `{noun}{verb:pp}`
+tests/fixtures/check/bad/src/main/java/com/example/order/domain/PurchaseService.java:3:14: error: `PurchaseService` does not match any pattern of rule `domain-type`: expected one of `{noun}`, `{noun}{role}`, `{noun}{verb:pp}`. If `PurchaseService` is a new term or behavior of the ubiquitous language, define it in `terms.yaml` first
 "
     );
 }
@@ -148,7 +148,7 @@ fn check_uses_another_dictionary_when_asked() {
         stdout(&output),
         "\
 tests/fixtures/check/bad/src/main/java/com/example/order/domain/Broken.java:3:22: error: syntax error: missing `}`
-tests/fixtures/check/bad/src/main/java/com/example/order/domain/PurchaseService.java:3:14: error: `PurchaseService` does not match any pattern of rule `domain-type`: expected one of `{noun}`, `{noun}{role}`, `{noun}{verb:pp}`
+tests/fixtures/check/bad/src/main/java/com/example/order/domain/PurchaseService.java:3:14: error: `PurchaseService` does not match any pattern of rule `domain-type`: expected one of `{noun}`, `{noun}{role}`, `{noun}{verb:pp}`. If `PurchaseService` is a new term or behavior of the ubiquitous language, define it in `terms.yaml` first
 "
     );
 }

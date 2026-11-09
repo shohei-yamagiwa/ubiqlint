@@ -13,7 +13,7 @@ use std::path::Path;
 
 use crate::config::{Config, Rule, Vocabulary};
 use crate::diagnostic::Diagnostic;
-use crate::dictionary::Dictionary;
+use crate::dictionary::{DICTIONARY_FILE_NAME, Dictionary};
 use crate::identifier;
 use crate::pattern::{Element, NounForm, Pattern, VerbForm};
 use crate::symbol::{Name, Symbol, SymbolKind, Symbols};
@@ -394,10 +394,13 @@ impl<'a> Checker<'a> {
             .map(|pattern| pattern.source())
             .collect();
         format!(
-            "`{}` does not match any pattern of rule `{}`: expected one of {}",
+            "`{}` does not match any pattern of rule `{}`: expected one of {}. \
+             If `{}` is a new term or behavior of the ubiquitous language, define it in \
+             `{DICTIONARY_FILE_NAME}` first",
             name.text,
             rule.id,
-            crate::yaml::quoted_list(&patterns)
+            crate::yaml::quoted_list(&patterns),
+            name.text,
         )
     }
 }
@@ -615,7 +618,9 @@ rules:
             messages(&diagnostics),
             [
                 "`Helper` does not match any pattern of rule `domain-type`: \
-                 expected one of `{noun}`, `{noun}{role}`, `{noun}{verb:pp}`",
+                 expected one of `{noun}`, `{noun}{role}`, `{noun}{verb:pp}`. \
+                 If `Helper` is a new term or behavior of the ubiquitous language, \
+                 define it in `terms.yaml` first",
                 "`run` does not match pattern `{verb}` of rule `domain-method`: `{verb}` is \
                  not bound to a term: the enclosing type `Helper` is not in the dictionary",
             ]
@@ -646,7 +651,9 @@ rules:
         assert_eq!(
             diagnostics[0].message,
             "`PurchaseService` does not match any pattern of rule `domain-type`: \
-             expected one of `{noun}`, `{noun}{role}`, `{noun}{verb:pp}`"
+             expected one of `{noun}`, `{noun}{role}`, `{noun}{verb:pp}`. \
+             If `PurchaseService` is a new term or behavior of the ubiquitous language, \
+             define it in `terms.yaml` first"
         );
     }
 
@@ -689,7 +696,9 @@ rules:
         assert_eq!(
             messages(&diagnostics),
             ["`get` does not match any pattern of rule `dto`: \
-              expected one of `get{any}`, `set{any}`"]
+              expected one of `get{any}`, `set{any}`. \
+              If `get` is a new term or behavior of the ubiquitous language, \
+              define it in `terms.yaml` first"]
         );
     }
 
@@ -725,7 +734,9 @@ rules:
         assert_eq!(
             diagnostics[0].message,
             "`items` does not match any pattern of rule `collection`: \
-             expected one of `{noun:plural}`"
+             expected one of `{noun:plural}`. \
+             If `items` is a new term or behavior of the ubiquitous language, \
+             define it in `terms.yaml` first"
         );
     }
 
