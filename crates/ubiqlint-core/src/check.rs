@@ -21,7 +21,7 @@ use crate::dictionary::Dictionary;
 use crate::identifier;
 use crate::matching::{MatchMode, Matcher};
 use crate::pattern::{Element, NounForm, Pattern, VerbForm};
-use crate::source::SourceFile;
+use crate::source::{Import, SourceFile};
 use crate::symbol::{Name, SymbolKind, Symbols};
 
 /// Checks declarations and imports using one dictionary and one configuration.
@@ -74,21 +74,32 @@ impl<'a> Checker<'a> {
             return Vec::new();
         }
         let mut diagnostics = self.check(&file.symbols, path);
+        diagnostics.extend(self.check_imports(&file.imports, path));
+        diagnostics.sort_by_key(|diagnostic| diagnostic.location);
+        diagnostics
+    }
+
+    /// Checks imports against each boundary rule that includes the file.
+    fn check_imports(&self, imports: &[Import], path: &Path) -> Vec<Diagnostic> {
         let rules: Vec<_> = self
             .config
             .import_rules
             .iter()
             .filter(|rule| rule.includes(path))
             .collect();
-        for import in &file.imports {
+        let mut diagnostics = Vec::new();
+        if rules.is_empty() {
+            return diagnostics;
+        }
+        for import in imports {
+            let qualified = import.path.join(".");
             for rule in &rules {
                 if rule.is_internal(import.namespace()) {
                     continue;
                 }
-                let path = import.path.join(".");
                 let message = if import.wildcard {
                     format!(
-                        "external wildcard import `{path}.*` is forbidden by rule `{}`: \
+                        "external wildcard import `{qualified}.*` is forbidden by rule `{}`: \
                          import non-conflicting names explicitly, or use fully qualified names",
                         rule.id
                     )
@@ -96,8 +107,8 @@ impl<'a> Checker<'a> {
                     import.name().filter(|name| self.term_names.contains(name))
                 {
                     format!(
-                        "external import `{path}` conflicts with dictionary term `{name}` \
-                         in `{}` under rule `{}`: use the fully qualified name `{path}` instead",
+                        "external import `{qualified}` conflicts with dictionary term `{name}` \
+                         in `{}` under rule `{}`: use the fully qualified name `{qualified}` instead",
                         self.dictionary_path.display(),
                         rule.id
                     )
@@ -110,7 +121,6 @@ impl<'a> Checker<'a> {
                 });
             }
         }
-        diagnostics.sort_by_key(|diagnostic| diagnostic.location);
         diagnostics
     }
 

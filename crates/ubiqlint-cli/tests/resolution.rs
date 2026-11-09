@@ -18,7 +18,6 @@ rules:
 ";
 
 const IMPORT_CONFIG: &str = "\
-rules: []
 import_rules:
   - id: domain-imports
     include: ['**/domain/**']

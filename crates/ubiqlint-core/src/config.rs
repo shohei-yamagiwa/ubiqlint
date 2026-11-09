@@ -230,15 +230,22 @@ fn read_config(diags: &mut Diagnostics, node: &Node) -> Option<Config> {
     let vocabularies = yaml::optional(&fields, "vocabularies", |node| {
         read_vocabularies(diags, node, &mut names)
     });
-    let rule_nodes = fields
-        .required(diags, "rules")
-        .and_then(|node| yaml::sequence(diags, node, "`rules`"));
+    if fields.optional("rules").is_none() && fields.optional("import_rules").is_none() {
+        diags.error(
+            yaml::location(node),
+            "the configuration must define `rules` or `import_rules`",
+        );
+    }
+    let rule_nodes = yaml::optional(&fields, "rules", |node| {
+        yaml::sequence(diags, node, "`rules`")
+    });
     let import_nodes = yaml::optional(&fields, "import_rules", |node| {
         yaml::sequence(diags, node, "`import_rules`")
     });
     // Read both kinds in source order so duplicate IDs always refer to
     // their first occurrence, even when `import_rules` precedes `rules`.
     let mut entries: Vec<_> = rule_nodes
+        .flatten()
         .unwrap_or_default()
         .iter()
         .map(|node| (node, false))
@@ -763,10 +770,39 @@ rules:
     }
 
     #[test]
-    fn reports_a_missing_rules_field() {
+    fn requires_at_least_one_rule_list() {
         assert_eq!(
             errors("vocabularies: {}\n"),
-            ["1:1: missing required field `rules` in the configuration"]
+            ["1:1: the configuration must define `rules` or `import_rules`"]
+        );
+        for source in [
+            "rules: []",
+            "import_rules: []",
+            "rules: []\nimport_rules: []",
+        ] {
+            let config = Config::from_yaml_str(source).unwrap();
+            assert!(config.rules.is_empty());
+            assert!(config.import_rules.is_empty());
+        }
+    }
+
+    #[test]
+    fn accepts_import_rules_without_a_naming_rule_list() {
+        let config = Config::from_yaml_str(
+            "import_rules: [{id: domain-imports, include: ['src/**'], internal_namespaces: []}]",
+        )
+        .unwrap();
+        assert!(config.rules.is_empty());
+        assert_eq!(config.import_rules.len(), 1);
+        assert!(config.has_rules_for(Path::new("src/Order.java")));
+        assert!(!config.has_rules_for(Path::new("test/OrderTest.java")));
+    }
+
+    #[test]
+    fn a_valid_import_rule_list_does_not_hide_an_invalid_naming_rule_list() {
+        assert_eq!(
+            errors("rules: null\nimport_rules: []\n"),
+            ["1:8: expected `rules` to be a sequence, found null"]
         );
     }
 

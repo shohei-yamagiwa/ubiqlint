@@ -17,6 +17,10 @@ pub struct SourceFile {
 /// language-specific escapes and omitting comments, separators and `*`.
 /// A named import ends in the name it introduces; a wildcard import ends
 /// in its namespace (which may itself be a type).
+///
+/// This model currently covers unaliased imports, as used by Java. Before
+/// adding languages with aliases or other module specifiers, the local name
+/// and source representation need a separate design; see `docs/plan.md` §8.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Import {
     pub path: Vec<String>,
