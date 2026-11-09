@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -6,8 +7,8 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 use ignore::WalkBuilder;
 use ubiqlint_core::{
-    CONFIG_FILE_NAME, Checker, Config, DICTIONARY_FILE_NAME, Diagnostic, Dictionary, Excludes,
-    LanguageAdapter,
+    CONFIG_FILE_NAME, Checker, Config, DICTIONARY_FILE_NAME, Diagnostic, Dictionary,
+    DictionaryResolver, Excludes, LanguageAdapter, ResolutionError,
 };
 use ubiqlint_java::JavaAdapter;
 
@@ -34,8 +35,8 @@ enum Command {
         /// The configuration file to apply
         #[arg(long, default_value = CONFIG_FILE_NAME)]
         config: PathBuf,
-        /// The dictionary to check against. Defaults to `terms.yaml` in the
-        /// directory of the configuration file
+        /// Use this dictionary for every source file instead of resolving
+        /// the nearest `terms.yaml` up to the configuration directory
         #[arg(long)]
         dictionary: Option<PathBuf>,
     },
@@ -106,6 +107,23 @@ impl Reporter {
         }
     }
 
+    /// Reports a dictionary failure once, even if many files use it.
+    fn resolution_error(&mut self, error: &ResolutionError, reported: &mut HashSet<PathBuf>) {
+        if !reported.insert(error.path().to_owned()) {
+            return;
+        }
+        match error {
+            ResolutionError::InvalidDictionary { path, diagnostics } => {
+                self.diagnostics(path, diagnostics);
+            }
+            _ => self.problem(&format!(
+                "{}: error: {}",
+                error.path().display(),
+                single_line(&error.to_string())
+            )),
+        }
+    }
+
     /// Prints a warning to stderr. Warnings never fail the run and do not
     /// mix into the `path:line:column: error:` lines on stdout.
     fn warn(&mut self, text: &str) {
@@ -154,8 +172,8 @@ fn validate(reporter: &mut Reporter, files: &[PathBuf]) {
 /// Checks every source file under the configuration file's directory,
 /// printing every problem as `path:line:column: error: message`.
 fn check(reporter: &mut Reporter, config_path: &Path, dictionary: Option<&Path>) {
-    // Every checked path is relative to the directory of the configuration
-    // file, which is also where the default dictionary lives.
+    // Every checked path is relative to the configuration directory, which
+    // is also the upper boundary of dictionary resolution.
     let root = config_path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -165,18 +183,28 @@ fn check(reporter: &mut Reporter, config_path: &Path, dictionary: Option<&Path>)
     } else {
         root
     };
-    let dictionary_path =
-        dictionary.map_or_else(|| root.join(DICTIONARY_FILE_NAME), Path::to_owned);
-
-    // Load both files before failing, so that every problem is reported in
-    // one run.
+    // Validate the root dictionary, if present, alongside the config so
+    // both sets of definition errors are still reported in one run. A root
+    // dictionary is optional: a project may only have nested contexts.
     let config = load(reporter, config_path, Config::from_yaml_str);
-    let dictionary = load(reporter, &dictionary_path, Dictionary::from_yaml_str);
-    let (Some(config), Some(dictionary)) = (config, dictionary) else {
+    let mut resolver = DictionaryResolver::new(root);
+    let mut reported = HashSet::new();
+    let fixed_dictionary = if let Some(path) = dictionary {
+        let loaded = load(reporter, path, Dictionary::from_yaml_str);
+        if loaded.is_none() {
+            return;
+        }
+        loaded
+    } else {
+        if let Err(error) = resolver.root_dictionary() {
+            reporter.resolution_error(&error, &mut reported);
+        }
+        None
+    };
+    let Some(config) = config else {
         return;
     };
 
-    let checker = Checker::new(&dictionary, &config);
     let excludes = config.excludes();
     let mut checked = 0;
     for relative in collect_files(reporter, read_root, root, excludes) {
@@ -194,10 +222,39 @@ fn check(reporter: &mut Reporter, config_path: &Path, dictionary: Option<&Path>)
         let Some(source) = read_file(reporter, &path) else {
             continue;
         };
-        let diagnostics = match adapter.extract(&source) {
-            Ok(symbols) => checker.check(&symbols, &relative),
-            Err(diagnostics) => diagnostics,
+        let symbols = match adapter.extract(&source) {
+            Ok(symbols) => symbols,
+            Err(diagnostics) => {
+                reporter.diagnostics(&path, &diagnostics);
+                continue;
+            }
         };
+        // Files outside every rule still get syntax checks, as before, but
+        // do not need a domain dictionary merely for being in the tree.
+        if !config.rules.iter().any(|rule| rule.includes(&relative)) {
+            continue;
+        }
+        let dictionary = if let Some(dictionary) = &fixed_dictionary {
+            dictionary
+        } else {
+            match resolver.resolve(&relative) {
+                Ok(Some(resolved)) => resolved.dictionary,
+                Ok(None) => {
+                    reporter.problem(&format!(
+                        "{}: error: no `{DICTIONARY_FILE_NAME}` found from the source directory \
+                         up to the configuration directory; add a dictionary or use `--dictionary`",
+                        path.display()
+                    ));
+                    continue;
+                }
+                Err(error) => {
+                    reporter.resolution_error(&error, &mut reported);
+                    continue;
+                }
+            }
+        };
+        let checker = Checker::new(dictionary, &config);
+        let diagnostics = checker.check(&symbols, &relative);
         reporter.diagnostics(&path, &diagnostics);
     }
     if checked == 0 {
