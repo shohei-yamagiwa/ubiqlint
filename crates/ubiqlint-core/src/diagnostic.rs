@@ -1,21 +1,11 @@
-//! Problems reported while loading definitions.
+//! Problems found in input files.
 
 use std::fmt;
 
-/// A position in a source file. Both `line` and `column` are 1-based.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Location {
-    pub line: usize,
-    pub column: usize,
-}
+use crate::location::Location;
 
-impl fmt::Display for Location {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}:{}", self.line, self.column)
-    }
-}
-
-/// A problem found in a dictionary or configuration file.
+/// A problem found in a file, such as an invalid definition in a dictionary
+/// or a syntax error in source code.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Diagnostic {
     pub location: Location,

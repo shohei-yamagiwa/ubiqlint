@@ -8,4 +8,6 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+tree-sitter.workspace = true
+tree-sitter-java.workspace = true
 ubiqlint-core.workspace = true

@@ -3,8 +3,9 @@
 
 use std::collections::HashMap;
 
-use crate::diagnostic::{Diagnostic, Location};
+use crate::diagnostic::Diagnostic;
 use crate::identifier;
+use crate::location::Location;
 use crate::words::Words;
 use crate::yaml::{self, Diagnostics, Fields, Node};
 

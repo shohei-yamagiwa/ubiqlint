@@ -6,7 +6,8 @@ use std::path::Path;
 
 use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 
-use crate::diagnostic::{Diagnostic, Location};
+use crate::diagnostic::Diagnostic;
+use crate::location::Location;
 use crate::pattern::{Pattern, RESERVED_NAMES};
 use crate::words::Words;
 use crate::yaml::{self, Diagnostics, Fields, Node};
