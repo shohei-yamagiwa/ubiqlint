@@ -17,6 +17,7 @@ use crate::dictionary::{DICTIONARY_FILE_NAME, Dictionary};
 use crate::identifier;
 use crate::pattern::{Element, NounForm, Pattern, VerbForm};
 use crate::symbol::{Name, Symbol, SymbolKind, Symbols};
+use crate::words::Words;
 
 /// Checks symbols against rules, using one dictionary and one configuration.
 pub struct Checker<'a> {
@@ -27,6 +28,17 @@ pub struct Checker<'a> {
     /// keeps the forms unique, so one map per form is enough.
     singular: HashMap<Vec<String>, usize>,
     plural: HashMap<Vec<String>, usize>,
+}
+
+/// Returns the placeholder a verb form is written as, such as `{verb:pp}`.
+fn verb_placeholder(form: VerbForm) -> &'static str {
+    match form {
+        VerbForm::Base => "{verb}",
+        VerbForm::S => "{verb:s}",
+        VerbForm::Past => "{verb:past}",
+        VerbForm::Pp => "{verb:pp}",
+        VerbForm::Ing => "{verb:ing}",
+    }
 }
 
 /// What a placeholder of a pattern matched.
@@ -93,10 +105,9 @@ impl<'a> Checker<'a> {
             .name
             .as_ref()
             .expect("only named symbols are checked");
+        // An identifier that splits into no words, such as `__`, can match
+        // no pattern at all, so it is a violation whenever a rule applies.
         let words = identifier::split(&name.text);
-        if words.is_empty() {
-            return None;
-        }
         let enclosing = self.enclosing_term(symbols, symbol);
         for pattern in &rule.patterns {
             if self.attempt(pattern, &words, enclosing, false).is_some() {
@@ -147,23 +158,44 @@ impl<'a> Checker<'a> {
                     bindings.iter().find_map(|binding| match binding {
                         Binding::Verb { form, span } => {
                             (!self.term_allows(term, *form, &words[span.clone()]))
-                                .then(|| span.clone())
+                                .then(|| (*form, span.clone()))
                         }
                         Binding::Noun { .. } => None,
                     })
                 });
                 match (term, failing_verb) {
-                    (Some(term), Some(span)) => {
-                        let verb = words[span].join(" ");
-                        format!(
-                            "`{}` does not match pattern `{}` of rule `{}`: `{verb}` is not \
-                             a defined behavior of `{}` ({})",
-                            name.text,
-                            pattern.source(),
-                            rule.id,
-                            self.dictionary.terms[term].name,
-                            self.defined_behaviors(term),
-                        )
+                    (Some(term), Some((form, span))) => {
+                        let verb_words = &words[span.clone()];
+                        let verb = verb_words.join(" ");
+                        let term_name = &self.dictionary.terms[term].name;
+                        if self.term_has_behavior(term, verb_words) {
+                            // The words are a defined behavior in another form,
+                            // so say which forms this pattern expects instead.
+                            let expected = self
+                                .term_forms(term, form)
+                                .iter()
+                                .map(|form| format!("`{form}`"))
+                                .collect::<Vec<_>>()
+                                .join(", ");
+                            format!(
+                                "`{}` does not match pattern `{}` of rule `{}`: `{verb}` is a \
+                                 defined behavior of `{term_name}` in a different form, but `{}` \
+                                 expects one of {expected}",
+                                name.text,
+                                pattern.source(),
+                                rule.id,
+                                verb_placeholder(form),
+                            )
+                        } else {
+                            format!(
+                                "`{}` does not match pattern `{}` of rule `{}`: `{verb}` is not \
+                                 a defined behavior of `{term_name}` ({})",
+                                name.text,
+                                pattern.source(),
+                                rule.id,
+                                self.defined_behaviors(term),
+                            )
+                        }
                     }
                     (None, _) if bindings.iter().any(|b| matches!(b, Binding::Verb { .. })) => {
                         match self.enclosing_type_name(symbols, symbol) {
@@ -278,18 +310,29 @@ impl<'a> Checker<'a> {
             // `get` alone.
             Element::Any => (pos + 1..=words.len())
                 .any(|end| self.match_elements(rest, words, end, enclosing, relax_verbs, bindings)),
-            Element::Verb(form) => (pos + 1..=words.len()).any(|end| {
-                bindings.push(Binding::Verb {
-                    form: *form,
-                    span: pos..end,
-                });
-                if self.match_elements(rest, words, end, enclosing, relax_verbs, bindings) {
-                    true
+            Element::Verb(form) => {
+                // In relaxed matching a base-form `{verb}` is kept to a single
+                // word, so that a pattern of only `{verb}` cannot swallow the
+                // whole identifier and produce a misleading message.
+                let max_len = if relax_verbs && *form == VerbForm::Base {
+                    1
                 } else {
-                    bindings.pop();
-                    false
-                }
-            }),
+                    words.len() - pos
+                };
+                (1..=max_len).any(|len| {
+                    let end = pos + len;
+                    bindings.push(Binding::Verb {
+                        form: *form,
+                        span: pos..end,
+                    });
+                    if self.match_elements(rest, words, end, enclosing, relax_verbs, bindings) {
+                        true
+                    } else {
+                        bindings.pop();
+                        false
+                    }
+                })
+            }
         }
     }
 
@@ -332,6 +375,43 @@ impl<'a> Checker<'a> {
             NounForm::Singular => self.singular.get(words).copied(),
             NounForm::Plural => self.plural.get(words).copied(),
         }
+    }
+
+    /// Tells whether `words` are any form of a behavior of `term`.
+    fn term_has_behavior(&self, term: usize, words: &[String]) -> bool {
+        self.dictionary.terms[term]
+            .behaviors
+            .iter()
+            .any(|behavior| {
+                [
+                    &behavior.forms.base,
+                    &behavior.forms.s,
+                    &behavior.forms.past,
+                    &behavior.forms.pp,
+                    &behavior.forms.ing,
+                ]
+                .iter()
+                .any(|form| form.as_slice() == words)
+            })
+    }
+
+    /// Returns the distinct words of the given form of the behaviors of
+    /// `term`, in definition order.
+    fn term_forms(&self, term: usize, form: VerbForm) -> Vec<Words> {
+        let mut forms: Vec<Words> = Vec::new();
+        for behavior in &self.dictionary.terms[term].behaviors {
+            let words = match form {
+                VerbForm::Base => &behavior.forms.base,
+                VerbForm::S => &behavior.forms.s,
+                VerbForm::Past => &behavior.forms.past,
+                VerbForm::Pp => &behavior.forms.pp,
+                VerbForm::Ing => &behavior.forms.ing,
+            };
+            if !forms.contains(words) {
+                forms.push(words.clone());
+            }
+        }
+        forms
     }
 
     /// Tells whether `words` are the given form of a behavior of `term`.
@@ -393,15 +473,28 @@ impl<'a> Checker<'a> {
             .iter()
             .map(|pattern| pattern.source())
             .collect();
-        format!(
-            "`{}` does not match any pattern of rule `{}`: expected one of {}. \
-             If `{}` is a new term or behavior of the ubiquitous language, define it in \
-             `{DICTIONARY_FILE_NAME}` first",
+        let head = format!(
+            "`{}` does not match any pattern of rule `{}`: expected one of {}",
             name.text,
             rule.id,
             crate::yaml::quoted_list(&patterns),
-            name.text,
-        )
+        );
+        // Only rules whose patterns speak about terms and behaviors can be
+        // satisfied by growing the dictionary; `get{any}` cannot.
+        let uses_dictionary = rule
+            .patterns
+            .iter()
+            .flat_map(Pattern::elements)
+            .any(|element| matches!(element, Element::Noun(_) | Element::Verb(_)));
+        if uses_dictionary {
+            format!(
+                "{head}. If `{}` is a new term or behavior of the ubiquitous language, define \
+                 it in `{DICTIONARY_FILE_NAME}` first",
+                name.text
+            )
+        } else {
+            head
+        }
     }
 }
 
@@ -693,12 +786,12 @@ rules:
         );
 
         let diagnostics = checker.check(&symbols, Path::new(DTO));
+        // The dto rule's patterns mention no `{noun}` or `{verb}`, so the
+        // message does not suggest growing the dictionary.
         assert_eq!(
             messages(&diagnostics),
             ["`get` does not match any pattern of rule `dto`: \
-              expected one of `get{any}`, `set{any}`. \
-              If `get` is a new term or behavior of the ubiquitous language, \
-              define it in `terms.yaml` first"]
+              expected one of `get{any}`, `set{any}`"]
         );
     }
 
@@ -764,5 +857,93 @@ rules:
         let diagnostics = checker.check(&symbols, Path::new(DOMAIN));
         assert_eq!(diagnostics.len(), 1);
         assert!(diagnostics[0].message.contains("`updateOrder`"));
+    }
+
+    #[test]
+    fn distinguishes_a_defined_behavior_in_a_different_form() {
+        let (dictionary, config) = setup();
+        let checker = Checker::new(&dictionary, &config);
+        // `OrderPlace` fails `{noun}{verb:pp}`, but `place` is defined: the
+        // message must say the pp form `placed` is what the pattern expects.
+        let mut symbols = Symbols::new();
+        symbols.push(
+            SymbolKind::Type,
+            name("OrderPlace", 3, 13),
+            span(3, 13),
+            None,
+        );
+        // `cancelsOrder` fails `{verb}{noun}`: `cancels` is the `s` form.
+        let order = symbols.push(SymbolKind::Type, name("Order", 10, 13), span(10, 13), None);
+        symbols.push(
+            SymbolKind::Method,
+            name("cancelsOrder", 11, 17),
+            span(11, 17),
+            Some(order),
+        );
+
+        let diagnostics = checker.check(&symbols, Path::new(DOMAIN));
+        assert_eq!(
+            messages(&diagnostics),
+            [
+                "`OrderPlace` does not match pattern `{noun}{verb:pp}` of rule `domain-type`: \
+                 `place` is a defined behavior of `Order` in a different form, but `{verb:pp}` \
+                 expects one of `placed`, `canceled`",
+                "`cancelsOrder` does not match pattern `{verb}{noun}` of rule `domain-method`: \
+                 `cancels` is a defined behavior of `Order` in a different form, but `{verb}` \
+                 expects one of `place`, `cancel`",
+            ]
+        );
+    }
+
+    #[test]
+    fn does_not_blame_the_whole_identifier_on_a_lone_verb_pattern() {
+        let (dictionary, config) = setup();
+        let checker = Checker::new(&dictionary, &config);
+        // Neither `placeOrders` nor `toString` is an attempt at a behavior;
+        // the message must not claim `place orders` or `to string` is one.
+        let symbols = order_class(&[
+            (SymbolKind::Method, "placeOrders", 4),
+            (SymbolKind::Method, "toString", 7),
+        ]);
+
+        let diagnostics = checker.check(&symbols, Path::new(DOMAIN));
+        assert_eq!(
+            messages(&diagnostics),
+            [
+                "`placeOrders` does not match any pattern of rule `domain-method`: \
+                 expected one of `{verb}`, `{verb}{noun}`. \
+                 If `placeOrders` is a new term or behavior of the ubiquitous language, \
+                 define it in `terms.yaml` first",
+                "`toString` does not match any pattern of rule `domain-method`: \
+                 expected one of `{verb}`, `{verb}{noun}`. \
+                 If `toString` is a new term or behavior of the ubiquitous language, \
+                 define it in `terms.yaml` first",
+            ]
+        );
+    }
+
+    #[test]
+    fn reports_an_identifier_that_splits_into_no_words() {
+        let (dictionary, config) = setup();
+        let checker = Checker::new(&dictionary, &config);
+        // `__` splits into no words, so no pattern can match it.
+        let symbols = order_class(&[(SymbolKind::Field, "__", 4)]);
+
+        let diagnostics = checker.check(&symbols, Path::new(DOMAIN));
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(
+            diagnostics[0].location,
+            Location {
+                line: 4,
+                column: 17
+            }
+        );
+        assert_eq!(
+            diagnostics[0].message,
+            "`__` does not match any pattern of rule `collection`: \
+             expected one of `{noun:plural}`. \
+             If `__` is a new term or behavior of the ubiquitous language, \
+             define it in `terms.yaml` first"
+        );
     }
 }
