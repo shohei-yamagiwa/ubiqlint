@@ -8,12 +8,9 @@ use clap::{ArgGroup, Args, Parser, Subcommand};
 use ubiqlint_core::dictionary::validate_term_name;
 use ubiqlint_core::{
     BehaviorChanges, CONFIG_FILE_NAME, Config, DICTIONARY_FILE_NAME, Diagnostic, Dictionary,
-    DictionaryResolver, Edit, EditError, FieldChange, NewTerm, ResolutionError, TermChanges,
-    VerbForms, Words,
+    DictionaryResolver, Edit, FieldChange, NewTerm, ResolutionError, TermChanges, VerbForms, Words,
 };
-use ubiqlint_project::{
-    CheckRun, Dictionaries, EditFileError, EditOutcome, FileReport, LoadError, Project, Skip,
-};
+use ubiqlint_project::{CheckRun, Dictionaries, FileReport, LoadError, Project, report};
 
 /// A linter for a ubiquitous language.
 #[derive(Parser)]
@@ -53,6 +50,14 @@ enum Command {
     /// Add, edit or remove a behavior of a term
     #[command(subcommand)]
     Behavior(BehaviorCommand),
+    /// Serve the project of a configuration file to coding agents, as an
+    /// MCP server over standard input and output
+    Mcp {
+        /// The configuration file of the project to serve. The server works
+        /// in its directory, and paths are relative to it
+        #[arg(long, default_value = CONFIG_FILE_NAME)]
+        config: PathBuf,
+    },
 }
 
 /// The dictionary an editing command changes.
@@ -228,8 +233,21 @@ fn parse_text(text: &str) -> Result<String, String> {
 }
 
 fn main() -> ExitCode {
+    let command = Cli::parse().command;
+    if let Command::Mcp { config } = &command {
+        // Served before the reporter exists: it locks standard output,
+        // which carries the protocol. Problems go to stderr instead.
+        return match ubiqlint_mcp::serve_stdio(config) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("error: the MCP server stopped: {error}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     let mut reporter = Reporter::new();
-    match Cli::parse().command {
+    match command {
+        Command::Mcp { .. } => unreachable!("the MCP server was served above"),
         Command::Validate { files } => validate(&mut reporter, &files),
         Command::Check {
             config,
@@ -237,27 +255,18 @@ fn main() -> ExitCode {
             paths,
         } => check(&mut reporter, &config, dictionary.as_deref(), &paths),
         Command::Term(command) => {
-            let (file, request) = term_request(command);
-            edit_dictionary(&mut reporter, &file.dictionary, &request);
+            let (file, edit) = term_edit(command);
+            edit_dictionary(&mut reporter, &file.dictionary, &edit);
         }
         Command::Behavior(command) => {
-            let (file, request) = behavior_request(command);
-            edit_dictionary(&mut reporter, &file.dictionary, &request);
+            let (file, edit) = behavior_edit(command);
+            edit_dictionary(&mut reporter, &file.dictionary, &edit);
         }
     }
     reporter.finish()
 }
 
-/// An edit and how to describe it once done.
-struct EditRequest {
-    edit: Edit,
-    /// What the edit did, such as "added term `Shipment`".
-    done: String,
-    /// What the edit was about, for when there was nothing to change.
-    subject: String,
-}
-
-fn term_request(command: TermCommand) -> (DictionaryFile, EditRequest) {
+fn term_edit(command: TermCommand) -> (DictionaryFile, Edit) {
     match command {
         TermCommand::Add {
             name,
@@ -268,17 +277,13 @@ fn term_request(command: TermCommand) -> (DictionaryFile, EditRequest) {
             file,
         } => (
             file,
-            EditRequest {
-                done: format!("added term `{name}`"),
-                subject: format!("term `{name}`"),
-                edit: Edit::AddTerm(NewTerm {
-                    name,
-                    plural,
-                    kind,
-                    ja,
-                    description,
-                }),
-            },
+            Edit::AddTerm(NewTerm {
+                name,
+                plural,
+                kind,
+                ja,
+                description,
+            }),
         ),
         TermCommand::Edit {
             name,
@@ -297,42 +302,25 @@ fn term_request(command: TermCommand) -> (DictionaryFile, EditRequest) {
                 None if unset => FieldChange::Unset,
                 None => FieldChange::Keep,
             };
-            let done = match &new_name {
-                Some(new_name) if *new_name != name => {
-                    format!("updated term `{name}` (renamed to `{new_name}`)")
-                }
-                _ => format!("updated term `{name}`"),
-            };
             (
                 file,
-                EditRequest {
-                    done,
-                    subject: format!("term `{name}`"),
-                    edit: Edit::EditTerm {
-                        name,
-                        changes: TermChanges {
-                            name: new_name,
-                            plural,
-                            kind: change(kind, unset_kind),
-                            ja: change(ja, unset_ja),
-                            description: change(description, unset_description),
-                        },
+                Edit::EditTerm {
+                    name,
+                    changes: TermChanges {
+                        name: new_name,
+                        plural,
+                        kind: change(kind, unset_kind),
+                        ja: change(ja, unset_ja),
+                        description: change(description, unset_description),
                     },
                 },
             )
         }
-        TermCommand::Remove { name, file } => (
-            file,
-            EditRequest {
-                done: format!("removed term `{name}`"),
-                subject: format!("term `{name}`"),
-                edit: Edit::RemoveTerm { name },
-            },
-        ),
+        TermCommand::Remove { name, file } => (file, Edit::RemoveTerm { name }),
     }
 }
 
-fn behavior_request(command: BehaviorCommand) -> (DictionaryFile, EditRequest) {
+fn behavior_edit(command: BehaviorCommand) -> (DictionaryFile, Edit) {
     match command {
         BehaviorCommand::Add {
             term,
@@ -344,18 +332,14 @@ fn behavior_request(command: BehaviorCommand) -> (DictionaryFile, EditRequest) {
             file,
         } => (
             file,
-            EditRequest {
-                done: format!("added behavior `{verb}` to term `{term}`"),
-                subject: format!("behavior `{verb}` of term `{term}`"),
-                edit: Edit::AddBehavior {
-                    term,
-                    forms: VerbForms {
-                        base: verb,
-                        s,
-                        past,
-                        pp,
-                        ing,
-                    },
+            Edit::AddBehavior {
+                term,
+                forms: VerbForms {
+                    base: verb,
+                    s,
+                    past,
+                    pp,
+                    ing,
                 },
             },
         ),
@@ -368,83 +352,33 @@ fn behavior_request(command: BehaviorCommand) -> (DictionaryFile, EditRequest) {
             pp,
             ing,
             file,
-        } => {
-            let done = match &new_verb {
-                Some(new_verb) if *new_verb != verb => {
-                    format!("updated behavior `{verb}` of term `{term}` (renamed to `{new_verb}`)")
-                }
-                _ => format!("updated behavior `{verb}` of term `{term}`"),
-            };
-            (
-                file,
-                EditRequest {
-                    done,
-                    subject: format!("behavior `{verb}` of term `{term}`"),
-                    edit: Edit::EditBehavior {
-                        term,
-                        verb,
-                        changes: BehaviorChanges {
-                            verb: new_verb,
-                            s,
-                            past,
-                            pp,
-                            ing,
-                        },
-                    },
-                },
-            )
-        }
-        BehaviorCommand::Remove { term, verb, file } => (
+        } => (
             file,
-            EditRequest {
-                done: format!("removed behavior `{verb}` from term `{term}`"),
-                subject: format!("behavior `{verb}` of term `{term}`"),
-                edit: Edit::RemoveBehavior { term, verb },
+            Edit::EditBehavior {
+                term,
+                verb,
+                changes: BehaviorChanges {
+                    verb: new_verb,
+                    s,
+                    past,
+                    pp,
+                    ing,
+                },
             },
         ),
+        BehaviorCommand::Remove { term, verb, file } => (file, Edit::RemoveBehavior { term, verb }),
     }
 }
 
 /// Applies an edit to the dictionary at `path` and writes it back, or
 /// reports why it was refused, leaving the file as it was.
-fn edit_dictionary(reporter: &mut Reporter, path: &Path, request: &EditRequest) {
-    match ubiqlint_project::edit_dictionary(path, &request.edit) {
-        Ok(EditOutcome::Changed) => {
-            reporter.line(&format!("{}: {}", path.display(), request.done));
+fn edit_dictionary(reporter: &mut Reporter, path: &Path, edit: &Edit) {
+    let result = ubiqlint_project::edit_dictionary(path, edit);
+    match report::edit_result(path, edit, &result) {
+        Ok(done) => {
+            reporter.line(&done);
         }
-        Ok(EditOutcome::Unchanged) => {
-            reporter.line(&format!(
-                "{}: no changes: {} already has these values",
-                path.display(),
-                request.subject
-            ));
-        }
-        Err(EditFileError::Read(error)) => reporter.read_error(path, &error),
-        Err(EditFileError::Write(error)) => reporter.problem(&format!(
-            "{}: error: cannot write the file: {error}",
-            path.display()
-        )),
-        Err(EditFileError::Edit(EditError::InvalidDictionary(diagnostics))) => {
-            reporter.diagnostics(path, &diagnostics);
-            reporter.problem(&format!(
-                "{}: error: cannot edit an invalid dictionary; fix the problems above first",
-                path.display()
-            ));
-        }
-        Err(EditFileError::Edit(EditError::Rejected(problems))) => {
-            for problem in problems {
-                reporter.problem(&format!(
-                    "{}: error: {}",
-                    path.display(),
-                    single_line(&problem)
-                ));
-            }
-        }
-        Err(EditFileError::Edit(EditError::Layout(message))) => reporter.problem(&format!(
-            "{}: error: {}",
-            path.display(),
-            single_line(&message)
-        )),
+        Err(problems) => reporter.problems(problems),
     }
 }
 
@@ -489,49 +423,33 @@ impl Reporter {
         self.line(text);
     }
 
+    /// Prints several problems and fails the run.
+    fn problems(&mut self, lines: impl IntoIterator<Item = String>) {
+        for line in lines {
+            self.problem(&line);
+        }
+    }
+
     /// Formats all parser and checker diagnostics consistently.
     fn diagnostics(&mut self, path: &Path, diagnostics: &[Diagnostic]) {
-        for diagnostic in diagnostics {
-            self.problem(&format!(
-                "{}:{}: error: {}",
-                path.display(),
-                diagnostic.location,
-                single_line(&diagnostic.message)
-            ));
-        }
+        self.problems(report::diagnostics(path, diagnostics));
     }
 
     /// Reports a file that could not be read, in the same format for
     /// definitions and source code.
     fn read_error(&mut self, path: &Path, error: &io::Error) {
-        self.problem(&format!(
-            "{}: error: cannot read the file: {error}",
-            path.display()
-        ));
+        self.problem(&report::read_error(path, error));
     }
 
     /// Reports why a definition file could not be loaded.
     fn load_error(&mut self, path: &Path, error: &LoadError) {
-        match error {
-            LoadError::Read(error) => self.read_error(path, error),
-            LoadError::Invalid(diagnostics) => self.diagnostics(path, diagnostics),
-        }
+        self.problems(report::load_error(path, error));
     }
 
     /// Reports a dictionary failure once, even if many files use it.
     fn resolution_error(&mut self, error: &ResolutionError) {
-        if !self.reported.insert(error.path().to_owned()) {
-            return;
-        }
-        match error {
-            ResolutionError::InvalidDictionary { path, diagnostics } => {
-                self.diagnostics(path, diagnostics);
-            }
-            _ => self.problem(&format!(
-                "{}: error: {}",
-                error.path().display(),
-                single_line(&error.to_string())
-            )),
+        if self.reported.insert(error.path().to_owned()) {
+            self.problems(report::resolution_error(error));
         }
     }
 
@@ -623,17 +541,27 @@ fn check(
             dictionary: loaded,
         }
     } else {
-        let mut resolver = DictionaryResolver::new(root);
-        if let Err(error) = resolver.root_dictionary() {
+        let mut dictionaries = Dictionaries::Nearest(DictionaryResolver::new(root));
+        if let Err(error) = dictionaries.check_root() {
             reporter.resolution_error(&error);
         }
-        Dictionaries::Nearest(resolver)
+        dictionaries
     };
     let Some(project) = project else {
         return;
     };
 
-    let files = select_files(reporter, &project, paths);
+    let selection = project.select(paths);
+    for path in &selection.outside {
+        reporter.problem(&report::outside_root(&project, path));
+    }
+    for (relative, skip) in &selection.skipped {
+        reporter.warn(&report::not_checked(&project.root().join(relative), *skip));
+    }
+    for error in &selection.walk_errors {
+        reporter.problem(&report::walk_error(&project, error));
+    }
+    let files = selection.files;
     // Finish dictionary loading before checking any file. This lets every
     // source using a dictionary share its lookup indices. Errors are
     // reported later, after the corresponding source has passed its read
@@ -676,67 +604,6 @@ fn check(
     }
 }
 
-/// Returns the files to check, relative to the project root and sorted:
-/// every file under the root if no `paths` are given, or else the files
-/// under the given directories and the given files themselves.
-///
-/// Directories are walked as the whole tree would be. A file given
-/// directly is checked even if `.gitignore` would hide it from a walk, but
-/// never if it matches `exclude` or is in no language ubiqlint knows; it is
-/// then skipped with a warning.
-fn select_files(reporter: &mut Reporter, project: &Project, paths: &[PathBuf]) -> Vec<PathBuf> {
-    let mut scopes = Vec::new();
-    let mut files = Vec::new();
-    for path in paths {
-        let Some(relative) = project.relative(path) else {
-            reporter.problem(&format!(
-                "{}: error: not under the configuration directory `{}`",
-                path.display(),
-                project.read_root().display()
-            ));
-            continue;
-        };
-        if project.read_root().join(&relative).is_dir() {
-            scopes.push(relative);
-            continue;
-        }
-        let reason = match project.skip(&relative) {
-            None => {
-                files.push(relative);
-                continue;
-            }
-            Some(Skip::Excluded) => "it matches `exclude` in the configuration",
-            Some(Skip::UnsupportedLanguage) => "ubiqlint cannot check this kind of file",
-        };
-        reporter.warn(&format!(
-            "{}: warning: not checked: {reason}",
-            project.root().join(&relative).display()
-        ));
-    }
-    if paths.is_empty() || !scopes.is_empty() {
-        let walk = project.walk(&scopes);
-        for error in &walk.errors {
-            let path = match &error.path {
-                Some(relative) => project.root().join(relative),
-                None => project.read_root().to_path_buf(),
-            };
-            reporter.problem(&format!(
-                "{}: error: cannot walk: {}",
-                path.display(),
-                error.message
-            ));
-        }
-        if paths.is_empty() {
-            // The walk is already sorted and has no duplicates.
-            return walk.files;
-        }
-        files.extend(walk.files);
-    }
-    files.sort();
-    files.dedup();
-    files
-}
-
 /// Reads `path` and parses it, reporting every problem through `reporter`.
 fn load<T>(
     reporter: &mut Reporter,
@@ -753,18 +620,4 @@ fn read_file(reporter: &mut Reporter, path: &Path) -> Option<String> {
     fs::read_to_string(path)
         .map_err(|error| reporter.read_error(path, &error))
         .ok()
-}
-
-/// Escapes control characters other than tabs, so that each problem stays on
-/// one line even when it quotes a value containing a line break.
-fn single_line(text: &str) -> String {
-    let mut line = String::with_capacity(text.len());
-    for c in text.chars() {
-        if c.is_control() && c != '\t' {
-            line.extend(c.escape_default());
-        } else {
-            line.push(c);
-        }
-    }
-    line
 }

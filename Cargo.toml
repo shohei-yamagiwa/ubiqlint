@@ -7,7 +7,8 @@ exclude = ["vendor/tree-sitter-java"]
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+# rmcp 3.x needs 1.88.
+rust-version = "1.88"
 license = "MIT"
 repository = "https://github.com/shohei-yamagiwa/ubiqlint"
 
@@ -15,10 +16,16 @@ repository = "https://github.com/shohei-yamagiwa/ubiqlint"
 ubiqlint-core = { path = "crates/ubiqlint-core" }
 ubiqlint-java = { path = "crates/ubiqlint-java" }
 ubiqlint-project = { path = "crates/ubiqlint-project" }
+ubiqlint-mcp = { path = "crates/ubiqlint-mcp" }
 clap = { version = "4", features = ["derive"] }
 globset = "0.4"
 ignore = "0.4"
+rmcp = { version = "3.9", features = ["transport-io"] }
 saphyr = "0.3.3"
+schemars = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 tree-sitter = "0.26"
+tokio = { version = "1", features = ["rt", "macros", "io-std"] }
 # tree-sitter-java 0.23.5 with modifiers allowed in patterns; see its README.
 tree-sitter-java = { path = "vendor/tree-sitter-java" }

@@ -1,0 +1,16 @@
+[package]
+name = "ubiqlint-mcp"
+description = "MCP server of ubiqlint, giving coding agents the dictionaries and checks of a project"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+rmcp.workspace = true
+schemars.workspace = true
+serde.workspace = true
+tokio.workspace = true
+ubiqlint-core.workspace = true
+ubiqlint-project.workspace = true

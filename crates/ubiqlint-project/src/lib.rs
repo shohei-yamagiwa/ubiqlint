@@ -13,6 +13,8 @@
 //! a file.
 
 mod paths;
+pub mod report;
+mod select;
 mod walk;
 mod write;
 
@@ -26,6 +28,7 @@ use ubiqlint_core::{
 };
 use ubiqlint_java::JavaAdapter;
 
+pub use select::Selection;
 pub use walk::{Walk, WalkError};
 pub use write::{EditFileError, EditOutcome, edit_dictionary, replace_file};
 
@@ -63,6 +66,18 @@ pub fn config_root(config_path: &Path) -> &Path {
     config_path.parent().unwrap_or_else(|| Path::new(""))
 }
 
+/// Returns `path`, given relative to the current directory or as an absolute
+/// path, relative to `root`, or `None` if `path` is not under `root`. The root
+/// itself is the empty path. See [`Project::relative`].
+pub fn relative_to(root: &Path, path: &Path) -> Option<PathBuf> {
+    let root = if root.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        root
+    };
+    paths::relative(root, path)
+}
+
 /// A configuration file and the directory it applies to.
 #[derive(Debug)]
 pub struct Project {
@@ -90,6 +105,18 @@ pub enum Dictionaries {
     },
     /// The nearest `terms.yaml` of each source file.
     Nearest(DictionaryResolver),
+}
+
+impl Dictionaries {
+    /// Loads the optional dictionary at the root itself, so that a broken
+    /// one is reported even when no source file uses it, as CI reports it.
+    /// A fixed dictionary has no root dictionary to check.
+    pub fn check_root(&mut self) -> Result<(), ResolutionError> {
+        match self {
+            Dictionaries::Fixed { .. } => Ok(()),
+            Dictionaries::Nearest(resolver) => resolver.root_dictionary().map(drop),
+        }
+    }
 }
 
 /// The result of checking one source file.
@@ -160,7 +187,7 @@ impl Project {
     /// absolute path, relative to the root. Returns `None` if `path` is not
     /// under the root. The root itself is the empty path.
     pub fn relative(&self, path: &Path) -> Option<PathBuf> {
-        paths::relative(self.read_root(), path)
+        relative_to(&self.root, path)
     }
 
     /// Finds the source files under the root, or only under `scopes`,

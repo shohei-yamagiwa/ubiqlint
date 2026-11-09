@@ -1,0 +1,412 @@
+[
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": false,
+      "title": "Add a behavior to a term"
+    },
+    "description": "Adds a behavior (a verb) to a term of a dictionary. Every form of the verb is given:\nubiqlint never guesses inflections. Only add a behavior that belongs to the domain's\nubiquitous language, never just to make a violation go away.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "dictionary": {
+          "description": "The dictionary to edit: an existing `terms.yaml`, relative to the\nconfiguration directory or absolute.",
+          "type": "string"
+        },
+        "ing": {
+          "description": "The present participle, such as `placing`.",
+          "type": "string"
+        },
+        "past": {
+          "description": "The past tense, such as `placed`.",
+          "type": "string"
+        },
+        "pp": {
+          "description": "The past participle, such as `placed`.",
+          "type": "string"
+        },
+        "s": {
+          "description": "The third-person singular present, such as `places`.",
+          "type": "string"
+        },
+        "term": {
+          "description": "The name of the term, exactly as in the dictionary.",
+          "type": "string"
+        },
+        "verb": {
+          "description": "The verb in its base form, in lowercase words, such as `place`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "dictionary",
+        "term",
+        "verb",
+        "s",
+        "past",
+        "pp",
+        "ing"
+      ],
+      "type": "object"
+    },
+    "name": "add_behavior"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": false,
+      "title": "Add a term to a dictionary"
+    },
+    "description": "Adds a term, without behaviors, to a dictionary. Every form is given: ubiqlint never\nguesses plurals. Only add a term that belongs to the domain's ubiquitous language, never\njust to make a violation go away.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "description": {
+          "description": "What the term means in the domain.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "dictionary": {
+          "description": "The dictionary to edit: an existing `terms.yaml`, relative to the\nconfiguration directory or absolute.",
+          "type": "string"
+        },
+        "ja": {
+          "description": "A Japanese label, such as `注文`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "description": "The kind of term, such as `entity` or `value_object`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "description": "The canonical spelling of the term, in ASCII letters and digits\nstarting with a letter, such as `LineItem`. Its singular form is the\nwords of the name (`line item`).",
+          "type": "string"
+        },
+        "plural": {
+          "description": "The plural form, in lowercase words separated by single spaces,\nsuch as `line items`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "dictionary",
+        "name",
+        "plural"
+      ],
+      "type": "object"
+    },
+    "name": "add_term"
+  },
+  {
+    "annotations": {
+      "openWorldHint": false,
+      "readOnlyHint": true,
+      "title": "Check a draft of a file"
+    },
+    "description": "Checks code before it is written: `content` is checked as the contents of the file at\n`path`, which need not exist. Reports each violation as\n`path:line:column: error: message`, with the defined terms or behaviors to choose from.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "content": {
+          "description": "The whole contents of the file, not a fragment of it.",
+          "type": "string"
+        },
+        "path": {
+          "description": "Where the code will be, relative to the configuration directory or\nabsolute. The rules and the dictionary are chosen by this path.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "content"
+      ],
+      "type": "object"
+    },
+    "name": "check_code"
+  },
+  {
+    "annotations": {
+      "openWorldHint": false,
+      "readOnlyHint": true,
+      "title": "Check files on disk"
+    },
+    "description": "Checks source files on disk, as `ubiqlint check` does in CI: the given files, the files\nunder the given directories, or the whole project. Reports each violation as\n`path:line:column: error: message`, with the defined terms or behaviors to choose from.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "limit": {
+          "description": "The most problems to list. Defaults to 100.",
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "paths": {
+          "default": [],
+          "description": "Files or directories to check, relative to the configuration\ndirectory or absolute. Leave it out to check the whole project.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "name": "check_files"
+  },
+  {
+    "annotations": {
+      "destructiveHint": true,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": false,
+      "title": "Edit a behavior of a term"
+    },
+    "description": "Changes a behavior of a term in a dictionary. Give at least one change; a new verb needs\nall of its other forms too.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "dictionary": {
+          "description": "The dictionary to edit: an existing `terms.yaml`, relative to the\nconfiguration directory or absolute.",
+          "type": "string"
+        },
+        "ing": {
+          "description": "A new present participle.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "new_verb": {
+          "description": "A new verb. The base form follows it; give `s`, `past`, `pp` and\n`ing` too.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "past": {
+          "description": "A new past tense.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "pp": {
+          "description": "A new past participle.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "s": {
+          "description": "A new third-person singular present.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "term": {
+          "description": "The name of the term, exactly as in the dictionary.",
+          "type": "string"
+        },
+        "verb": {
+          "description": "The verb of the behavior to edit, in lowercase words.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "dictionary",
+        "term",
+        "verb"
+      ],
+      "type": "object"
+    },
+    "name": "edit_behavior"
+  },
+  {
+    "annotations": {
+      "destructiveHint": true,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": false,
+      "title": "Edit a term of a dictionary"
+    },
+    "description": "Changes fields of a term in a dictionary. Give at least one change.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "description": {
+          "description": "A new description.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "dictionary": {
+          "description": "The dictionary to edit: an existing `terms.yaml`, relative to the\nconfiguration directory or absolute.",
+          "type": "string"
+        },
+        "ja": {
+          "description": "A new Japanese label.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "description": "A new kind of term.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "description": "The name of the term to edit, exactly as in the dictionary.",
+          "type": "string"
+        },
+        "new_name": {
+          "description": "A new name. The singular form follows it; give `plural` too if the\nsingular form changes.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "plural": {
+          "description": "A new plural form, in lowercase words.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "unset_description": {
+          "default": false,
+          "description": "Remove the description.",
+          "type": "boolean"
+        },
+        "unset_ja": {
+          "default": false,
+          "description": "Remove the Japanese label.",
+          "type": "boolean"
+        },
+        "unset_kind": {
+          "default": false,
+          "description": "Remove the kind of term.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "dictionary",
+        "name"
+      ],
+      "type": "object"
+    },
+    "name": "edit_term"
+  },
+  {
+    "annotations": {
+      "openWorldHint": false,
+      "readOnlyHint": true,
+      "title": "Get the rules and dictionary of a file"
+    },
+    "description": "Shows what a source file must follow: the naming rules and import rules that apply to it,\nand the contents of its dictionary, the nearest `terms.yaml`. Call it before naming\nanything in the file. In patterns, `{noun}` is a term of the dictionary and\n`{noun:plural}` its plural; `{verb}` is a behavior of the term it is bound to (a `{noun}`\nin the same name, or else the enclosing type), and `{verb:s}`, `{verb:past}`,\n`{verb:pp}` and `{verb:ing}` are its forms; `{any}` is any words; other `{name}`s are\nvocabularies; anything else is literal.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "description": "The source file, relative to the configuration directory or absolute.\nIt need not exist yet: give the path a new file will have.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "type": "object"
+    },
+    "name": "get_context"
+  },
+  {
+    "annotations": {
+      "destructiveHint": true,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": false,
+      "title": "Remove a behavior from a term"
+    },
+    "description": "Removes a behavior from a term of a dictionary.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "dictionary": {
+          "description": "The dictionary to edit: an existing `terms.yaml`, relative to the\nconfiguration directory or absolute.",
+          "type": "string"
+        },
+        "term": {
+          "description": "The name of the term, exactly as in the dictionary.",
+          "type": "string"
+        },
+        "verb": {
+          "description": "The verb of the behavior to remove, in lowercase words.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "dictionary",
+        "term",
+        "verb"
+      ],
+      "type": "object"
+    },
+    "name": "remove_behavior"
+  },
+  {
+    "annotations": {
+      "destructiveHint": true,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": false,
+      "title": "Remove a term from a dictionary"
+    },
+    "description": "Removes a term, together with its behaviors, from a dictionary.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "dictionary": {
+          "description": "The dictionary to edit: an existing `terms.yaml`, relative to the\nconfiguration directory or absolute.",
+          "type": "string"
+        },
+        "name": {
+          "description": "The name of the term to remove, exactly as in the dictionary.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "dictionary",
+        "name"
+      ],
+      "type": "object"
+    },
+    "name": "remove_term"
+  }
+]
