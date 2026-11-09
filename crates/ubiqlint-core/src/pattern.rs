@@ -43,6 +43,26 @@ pub enum VerbForm {
     Ing,
 }
 
+impl VerbForm {
+    /// Returns the name used in patterns, such as `pp`.
+    pub fn name(self) -> &'static str {
+        VERB_FORMS
+            .iter()
+            .find(|(_, form)| *form == self)
+            .map(|(name, _)| *name)
+            .expect("every verb form has a name")
+    }
+
+    /// Returns every form.
+    pub const ALL: [VerbForm; 5] = [
+        VerbForm::Base,
+        VerbForm::S,
+        VerbForm::Past,
+        VerbForm::Pp,
+        VerbForm::Ing,
+    ];
+}
+
 /// Placeholder names that cannot be used as vocabulary names.
 pub const RESERVED_NAMES: [&str; 3] = ["noun", "verb", "any"];
 

@@ -16,6 +16,7 @@ ubiqlint-core = { path = "crates/ubiqlint-core" }
 ubiqlint-java = { path = "crates/ubiqlint-java" }
 clap = { version = "4", features = ["derive"] }
 globset = "0.4"
+ignore = "0.4"
 saphyr = "0.3.3"
 tree-sitter = "0.26"
 # tree-sitter-java 0.23.5 with modifiers allowed in patterns; see its README.

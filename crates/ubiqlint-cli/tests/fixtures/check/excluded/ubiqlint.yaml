@@ -1,0 +1,10 @@
+exclude:
+  - "src/main/java/**/generated/**"
+
+rules:
+  - id: domain-method
+    include: ["src/main/java/**"]
+    target: method
+    patterns:
+      - "{verb}"
+      - "{verb}{noun}"

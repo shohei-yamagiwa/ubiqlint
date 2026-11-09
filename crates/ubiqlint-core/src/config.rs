@@ -9,6 +9,7 @@ use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use crate::diagnostic::Diagnostic;
 use crate::location::Location;
 use crate::pattern::{Pattern, RESERVED_NAMES};
+use crate::symbol::SymbolKind;
 use crate::words::Words;
 use crate::yaml::{self, Diagnostics, Fields, Node};
 
@@ -20,6 +21,52 @@ pub const CONFIG_FILE_NAME: &str = "ubiqlint.yaml";
 pub struct Config {
     pub vocabularies: Vec<Vocabulary>,
     pub rules: Vec<Rule>,
+    /// Kept private, together with its compiled form, so that the two
+    /// cannot get out of sync.
+    exclude_globs: Vec<String>,
+    excludes: Excludes,
+}
+
+/// Matches paths against `exclude`, for file collection.
+///
+/// `matches` applies the globs as written, to files. `matches_dir` prunes
+/// a directory only when a glob ends in `/**` and its prefix names the
+/// directory, so that a glob such as `src/*` never swallows `src/domain`.
+#[derive(Clone, Debug)]
+pub struct Excludes {
+    set: GlobSet,
+    dir_set: GlobSet,
+}
+
+impl Excludes {
+    fn new(globs: &[String], set: GlobSet) -> Self {
+        // A directory is pruned only by the prefix of a `/**`-suffixed
+        // glob. Invalid globs were already reported where they were read,
+        // so skip them here.
+        let mut dir_builder = GlobSetBuilder::new();
+        for glob in globs {
+            if let Some(prefix) = glob.strip_suffix("/**") {
+                if let Ok(glob) = GlobBuilder::new(prefix).literal_separator(true).build() {
+                    dir_builder.add(glob);
+                }
+            }
+        }
+        Self {
+            set,
+            dir_set: dir_builder.build().unwrap_or_else(|_| GlobSet::empty()),
+        }
+    }
+
+    /// Tells whether `path` is excluded, as written in `exclude`.
+    pub fn matches(&self, path: &Path) -> bool {
+        self.set.is_match(path)
+    }
+
+    /// Tells whether a directory should be pruned: a `/**`-suffixed glob's
+    /// prefix matches it.
+    pub fn matches_dir(&self, path: &Path) -> bool {
+        self.dir_set.is_match(path)
+    }
 }
 
 /// A named list of word sequences that patterns can refer to, such as
@@ -74,6 +121,19 @@ impl Target {
             .map(|(name, _)| *name)
             .expect("every target has a name")
     }
+
+    /// Tells whether a symbol of `kind` is checked by a rule with this
+    /// target. Constructors are never checked: their names are given by
+    /// their types.
+    pub fn matches(self, kind: SymbolKind) -> bool {
+        kind == match self {
+            Self::Type => SymbolKind::Type,
+            Self::Method => SymbolKind::Method,
+            Self::Field => SymbolKind::Field,
+            Self::Parameter => SymbolKind::Parameter,
+            Self::Variable => SymbolKind::Variable,
+        }
+    }
 }
 
 impl Config {
@@ -83,6 +143,18 @@ impl Config {
         let mut diags = Diagnostics::default();
         let config = read_config(&mut diags, &root);
         diags.finish(config)
+    }
+
+    /// Returns the glob patterns of the files that are never checked, as
+    /// written in `exclude`.
+    pub fn exclude_globs(&self) -> &[String] {
+        &self.exclude_globs
+    }
+
+    /// Returns the matcher for `exclude`: paths given relative to the
+    /// directory of the configuration file.
+    pub fn excludes(&self) -> &Excludes {
+        &self.excludes
     }
 }
 
@@ -101,7 +173,12 @@ impl Rule {
 }
 
 fn read_config(diags: &mut Diagnostics, node: &Node) -> Option<Config> {
-    let fields = Fields::new(diags, node, "the configuration", &["vocabularies", "rules"])?;
+    let fields = Fields::new(
+        diags,
+        node,
+        "the configuration",
+        &["vocabularies", "exclude", "rules"],
+    )?;
     // Patterns may refer to every vocabulary that is declared, even an
     // invalid one, so that a bad vocabulary is reported once instead of
     // again at each pattern that uses it.
@@ -119,9 +196,16 @@ fn read_config(diags: &mut Diagnostics, node: &Node) -> Option<Config> {
                 .filter_map(|item| read_rule(diags, item, &names, &mut ids))
                 .collect::<Vec<_>>()
         });
+    let (exclude_globs, exclude_set) = yaml::optional(&fields, "exclude", |node| {
+        read_globs(diags, node, "`exclude`")
+    })
+    .flatten()
+    .unwrap_or_else(|| (Vec::new(), GlobSet::empty()));
     Some(Config {
         vocabularies: vocabularies?.unwrap_or_default(),
         rules: rules?,
+        excludes: Excludes::new(&exclude_globs, exclude_set),
+        exclude_globs,
     })
 }
 
@@ -200,7 +284,7 @@ fn read_rule(
     });
     let include = fields
         .required(diags, "include")
-        .and_then(|node| read_include(diags, node));
+        .and_then(|node| read_globs(diags, node, "`include`"));
     let target = fields
         .required(diags, "target")
         .and_then(|node| read_target(diags, node));
@@ -246,13 +330,15 @@ fn read_rule_id<'a>(diags: &mut Diagnostics, node: &'a Node) -> Option<&'a str> 
     Some(id)
 }
 
-fn read_include(diags: &mut Diagnostics, node: &Node) -> Option<(Vec<String>, GlobSet)> {
-    let items = yaml::non_empty_sequence(diags, node, "`include`")?;
+/// Reads a list of globs, such as `include` or `exclude`, with the same
+/// syntax: `*` does not cross directory separators, `**` does.
+fn read_globs(diags: &mut Diagnostics, node: &Node, what: &str) -> Option<(Vec<String>, GlobSet)> {
+    let items = yaml::non_empty_sequence(diags, node, what)?;
     let mut globs = Vec::with_capacity(items.len());
     let mut builder = GlobSetBuilder::new();
     let mut failed = false;
     for item in items {
-        let Some(text) = yaml::non_empty_string(diags, item, "a glob in `include`") else {
+        let Some(text) = yaml::non_empty_string(diags, item, &format!("a glob in {what}")) else {
             failed = true;
             continue;
         };
@@ -278,7 +364,7 @@ fn read_include(diags: &mut Diagnostics, node: &Node) -> Option<(Vec<String>, Gl
         Err(error) => {
             diags.error(
                 yaml::location(node),
-                format!("invalid globs in `include`: {error}"),
+                format!("invalid globs in {what}: {error}"),
             );
             None
         }
@@ -558,9 +644,89 @@ rules:
     }
 
     #[test]
+    fn reads_and_matches_exclude_globs() {
+        let source = r#"
+exclude: ["target/**", "legacy/**"]
+rules:
+  - id: domain-type
+    include: ["**/domain/**"]
+    target: type
+    patterns: ["{noun}"]
+"#;
+        let config = Config::from_yaml_str(source).unwrap();
+        assert_eq!(config.exclude_globs(), ["target/**", "legacy/**"]);
+        assert!(
+            config
+                .excludes()
+                .matches(Path::new("target/debug/Build.java"))
+        );
+        assert!(config.excludes().matches(Path::new("legacy/Old.java")));
+        assert!(
+            !config
+                .excludes()
+                .matches(Path::new("src/domain/Order.java"))
+        );
+        // `legacy/**` does not match `legacy` itself, as in `include`.
+        assert!(!config.excludes().matches(Path::new("legacy")));
+    }
+
+    #[test]
+    fn exclude_never_prunes_a_directory_by_a_file_glob() {
+        let source = r#"
+exclude: ["src/*", "legacy/**"]
+rules:
+  - id: domain-type
+    include: ["**/domain/**"]
+    target: type
+    patterns: ["{noun}"]
+"#;
+        let config = Config::from_yaml_str(source).unwrap();
+        let excludes = config.excludes();
+        // `src/*` matches files, but not the directory `src/domain`.
+        assert!(excludes.matches(Path::new("src/Main.java")));
+        assert!(!excludes.matches(Path::new("src/domain/Order.java")));
+        assert!(!excludes.matches_dir(Path::new("src/domain")));
+        // `legacy/**` prunes the directory `legacy` itself.
+        assert!(excludes.matches(Path::new("legacy/Old.java")));
+        assert!(excludes.matches_dir(Path::new("legacy")));
+        assert!(!excludes.matches_dir(Path::new("src")));
+    }
+
+    #[test]
+    fn exclude_is_optional() {
+        let config = Config::from_yaml_str(EXAMPLE).unwrap();
+        assert!(config.exclude_globs().is_empty());
+        assert!(!config.excludes().matches(Path::new("anything.java")));
+    }
+
+    #[test]
+    fn reports_invalid_exclude_globs() {
+        let source = "exclude: [\"src/[a\"]\nrules: []\n";
+        assert_eq!(
+            errors(source),
+            ["1:11: invalid glob `src/[a`: unclosed character class; missing ']'"]
+        );
+    }
+
+    #[test]
     fn target_names_round_trip() {
         for (name, target) in TARGETS {
             assert_eq!(target.name(), name);
+        }
+    }
+
+    #[test]
+    fn targets_match_their_symbol_kinds_only() {
+        use crate::symbol::SymbolKind::*;
+        assert!(Target::Type.matches(Type));
+        assert!(Target::Method.matches(Method));
+        assert!(Target::Field.matches(Field));
+        assert!(Target::Parameter.matches(Parameter));
+        assert!(Target::Variable.matches(Variable));
+        assert!(!Target::Method.matches(Type));
+        // Constructors are never checked.
+        for (_, target) in TARGETS {
+            assert!(!target.matches(crate::symbol::SymbolKind::Constructor));
         }
     }
 }

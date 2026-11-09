@@ -1,0 +1,12 @@
+context: order
+terms:
+  - name: Order
+    kind: entity
+    forms: { singular: order, plural: orders }
+    behaviors:
+      - verb: place
+        forms: { base: place, s: places, past: placed, pp: placed, ing: placing }
+      - verb: cancel
+        forms: { base: cancel, s: cancels, past: canceled, pp: canceled, ing: canceling }
+      - verb: update
+        forms: { base: update, s: updates, past: updated, pp: updated, ing: updating }

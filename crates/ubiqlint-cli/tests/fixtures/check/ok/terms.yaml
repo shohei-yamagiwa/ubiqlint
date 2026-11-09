@@ -1,0 +1,16 @@
+context: order
+terms:
+  - name: Order
+    kind: entity
+    ja: 注文
+    description: 顧客が確定させた購入の単位
+    forms: { singular: order, plural: orders }
+    behaviors:
+      - verb: place
+        forms: { base: place, s: places, past: placed, pp: placed, ing: placing }
+      - verb: cancel
+        forms: { base: cancel, s: cancels, past: canceled, pp: canceled, ing: canceling }
+  - name: LineItem
+    kind: value_object
+    ja: 注文行
+    forms: { singular: line item, plural: line items }
