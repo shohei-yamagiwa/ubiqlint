@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use crate::diagnostic::Diagnostic;
 use crate::identifier;
 use crate::location::Location;
+use crate::pattern::VerbForm;
 use crate::words::Words;
 use crate::yaml::{self, Diagnostics, Fields, Node};
 
@@ -64,6 +65,24 @@ pub struct VerbForms {
     pub pp: Words,
     /// The present participle, such as `placing`.
     pub ing: Words,
+}
+
+impl VerbForms {
+    /// Returns the words of `form`.
+    pub fn get(&self, form: VerbForm) -> &Words {
+        match form {
+            VerbForm::Base => &self.base,
+            VerbForm::S => &self.s,
+            VerbForm::Past => &self.past,
+            VerbForm::Pp => &self.pp,
+            VerbForm::Ing => &self.ing,
+        }
+    }
+
+    /// Returns every form's words, in the order of [`VerbForm::ALL`].
+    pub fn all(&self) -> [&Words; 5] {
+        [&self.base, &self.s, &self.past, &self.pp, &self.ing]
+    }
 }
 
 impl Dictionary {
