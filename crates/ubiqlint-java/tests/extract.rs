@@ -370,6 +370,47 @@ fn extracts_local_variables() {
 }
 
 #[test]
+fn accepts_modifiers_in_patterns() {
+    // tree-sitter-java 0.23.5 rejects these; the vendored grammar accepts
+    // them.
+    let source = r#"
+        class FinalPattern {
+            int f(Object o) {
+                if (o instanceof Point(final int x, @Deprecated var y)) {}
+                return switch (o) {
+                    case final String s -> 1;
+                    case @Deprecated Integer i when i > 0 -> 2;
+                    default -> 0;
+                };
+            }
+        }
+    "#;
+    assert_eq!(
+        outline(source),
+        lines(
+            "
+            type FinalPattern
+              method f
+                parameter o
+                variable x
+                variable y
+                variable s
+                variable i
+            "
+        )
+    );
+}
+
+#[test]
+fn includes_modifiers_in_pattern_spans() {
+    let source = "class A { int f(Object o) {\n\
+                  return switch (o) { case final String s -> 1; default -> 0; };\n\
+                  } }";
+    let symbols = symbols(source);
+    assert_eq!(find(&symbols, "s").span, span((2, 26), (2, 40)));
+}
+
+#[test]
 fn skips_unnamed_variables() {
     let source = r#"
         class Order {

@@ -1,6 +1,8 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
+# A third-party grammar, patched and generated rather than written here.
+exclude = ["vendor/tree-sitter-java"]
 
 [workspace.package]
 version = "0.1.0"
@@ -16,4 +18,5 @@ clap = { version = "4", features = ["derive"] }
 globset = "0.4"
 saphyr = "0.3.3"
 tree-sitter = "0.26"
-tree-sitter-java = "0.23.5"
+# tree-sitter-java 0.23.5 with modifiers allowed in patterns; see its README.
+tree-sitter-java = { path = "vendor/tree-sitter-java" }

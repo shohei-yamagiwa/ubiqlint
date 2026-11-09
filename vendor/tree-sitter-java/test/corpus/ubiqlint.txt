@@ -1,0 +1,80 @@
+================================================================================
+modifiers in type patterns and record pattern components (ubiqlint)
+================================================================================
+
+class A {
+  int f(Object o) {
+    if (o instanceof Point(final int x, @Deprecated var y)) {}
+    return switch (o) {
+      case final String s -> 1;
+      case @Deprecated final Integer i when i > 0 -> 2;
+      default -> 0;
+    };
+  }
+}
+
+--------------------------------------------------------------------------------
+
+(program
+  (class_declaration
+    (identifier)
+    (class_body
+      (method_declaration
+        (integral_type)
+        (identifier)
+        (formal_parameters
+          (formal_parameter
+            (type_identifier)
+            (identifier)))
+        (block
+          (if_statement
+            (parenthesized_expression
+              (instanceof_expression
+                (identifier)
+                (record_pattern
+                  (identifier)
+                  (record_pattern_body
+                    (record_pattern_component
+                      (modifiers)
+                      (integral_type)
+                      (identifier))
+                    (record_pattern_component
+                      (modifiers
+                        (marker_annotation
+                          (identifier)))
+                      (type_identifier)
+                      (identifier))))))
+            (block))
+          (return_statement
+            (switch_expression
+              (parenthesized_expression
+                (identifier))
+              (switch_block
+                (switch_rule
+                  (switch_label
+                    (pattern
+                      (type_pattern
+                        (modifiers)
+                        (type_identifier)
+                        (identifier))))
+                  (expression_statement
+                    (decimal_integer_literal)))
+                (switch_rule
+                  (switch_label
+                    (pattern
+                      (type_pattern
+                        (modifiers
+                          (marker_annotation
+                            (identifier)))
+                        (type_identifier)
+                        (identifier)))
+                    (guard
+                      (binary_expression
+                        (identifier)
+                        (decimal_integer_literal))))
+                  (expression_statement
+                    (decimal_integer_literal)))
+                (switch_rule
+                  (switch_label)
+                  (expression_statement
+                    (decimal_integer_literal)))))))))))
