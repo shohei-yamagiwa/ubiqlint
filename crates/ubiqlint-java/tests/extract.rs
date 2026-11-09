@@ -2,7 +2,9 @@ use ubiqlint_core::{LanguageAdapter, Location, Span, Symbol, SymbolKind, Symbols
 use ubiqlint_java::{JavaAdapter, extract};
 
 fn symbols(source: &str) -> Symbols {
-    extract(source).unwrap_or_else(|errors| panic!("unexpected syntax errors: {errors:?}"))
+    extract(source)
+        .unwrap_or_else(|errors| panic!("unexpected syntax errors: {errors:?}"))
+        .symbols
 }
 
 /// Lists the symbols one per line as `kind name`, indented by depth.
@@ -58,7 +60,7 @@ fn span(start: (usize, usize), end: (usize, usize)) -> Span {
 fn handles_java_files() {
     assert_eq!(JavaAdapter.extensions(), ["java"]);
     let symbols = JavaAdapter.extract("class Order {}").unwrap();
-    assert_eq!(symbols.len(), 1);
+    assert_eq!(symbols.symbols.len(), 1);
 }
 
 #[test]

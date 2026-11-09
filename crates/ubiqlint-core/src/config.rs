@@ -1,5 +1,5 @@
-//! Configuration (`ubiqlint.yaml`): which naming patterns apply to which
-//! identifiers, and where.
+//! Configuration (`ubiqlint.yaml`): naming patterns and import boundaries,
+//! and the paths where they apply.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -21,6 +21,7 @@ pub const CONFIG_FILE_NAME: &str = "ubiqlint.yaml";
 pub struct Config {
     pub vocabularies: Vec<Vocabulary>,
     pub rules: Vec<Rule>,
+    pub import_rules: Vec<ImportRule>,
     /// Kept private, together with its compiled form, so that the two
     /// cannot get out of sync.
     exclude_globs: Vec<String>,
@@ -92,6 +93,41 @@ pub struct Rule {
     include_set: GlobSet,
 }
 
+/// Protects dictionary names from imports across a namespace boundary.
+#[derive(Clone, Debug)]
+pub struct ImportRule {
+    pub id: String,
+    pub location: Location,
+    include_globs: Vec<String>,
+    include_set: GlobSet,
+    internal_namespaces: Vec<Vec<String>>,
+}
+
+impl ImportRule {
+    /// The path globs as written in `include`.
+    pub fn include_globs(&self) -> &[String] {
+        &self.include_globs
+    }
+
+    /// Matches a path relative to the configuration file's directory.
+    pub fn includes(&self, path: &Path) -> bool {
+        self.include_set.is_match(path)
+    }
+
+    /// The internal namespace prefixes, split into components.
+    pub fn internal_namespaces(&self) -> &[Vec<String>] {
+        &self.internal_namespaces
+    }
+
+    /// Matches complete namespace components, so `com.example.order`
+    /// includes its children but never `com.example.ordering`.
+    pub fn is_internal(&self, namespace: &[String]) -> bool {
+        self.internal_namespaces
+            .iter()
+            .any(|prefix| namespace.starts_with(prefix))
+    }
+}
+
 /// The kind of identifier a rule applies to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Target {
@@ -145,6 +181,14 @@ impl Config {
         diags.finish(config)
     }
 
+    /// Whether any naming or import rule includes `path`, relative to the
+    /// configuration directory. Covered files need a dictionary, even when
+    /// no naming rule applies. File collection handles exclusions separately.
+    pub fn has_rules_for(&self, path: &Path) -> bool {
+        self.rules.iter().any(|rule| rule.includes(path))
+            || self.import_rules.iter().any(|rule| rule.includes(path))
+    }
+
     /// Returns the glob patterns of the files that are never checked, as
     /// written in `exclude`.
     pub fn exclude_globs(&self) -> &[String] {
@@ -177,7 +221,7 @@ fn read_config(diags: &mut Diagnostics, node: &Node) -> Option<Config> {
         diags,
         node,
         "the configuration",
-        &["vocabularies", "exclude", "rules"],
+        &["vocabularies", "exclude", "rules", "import_rules"],
     )?;
     // Patterns may refer to every vocabulary that is declared, even an
     // invalid one, so that a bad vocabulary is reported once instead of
@@ -186,16 +230,46 @@ fn read_config(diags: &mut Diagnostics, node: &Node) -> Option<Config> {
     let vocabularies = yaml::optional(&fields, "vocabularies", |node| {
         read_vocabularies(diags, node, &mut names)
     });
-    let rules = fields
-        .required(diags, "rules")
-        .and_then(|node| yaml::sequence(diags, node, "`rules`"))
-        .map(|items| {
-            let mut ids = HashMap::new();
-            items
+    if fields.optional("rules").is_none() && fields.optional("import_rules").is_none() {
+        diags.error(
+            yaml::location(node),
+            "the configuration must define `rules` or `import_rules`",
+        );
+    }
+    let rule_nodes = yaml::optional(&fields, "rules", |node| {
+        yaml::sequence(diags, node, "`rules`")
+    });
+    let import_nodes = yaml::optional(&fields, "import_rules", |node| {
+        yaml::sequence(diags, node, "`import_rules`")
+    });
+    // Read both kinds in source order so duplicate IDs always refer to
+    // their first occurrence, even when `import_rules` precedes `rules`.
+    let mut entries: Vec<_> = rule_nodes
+        .flatten()
+        .unwrap_or_default()
+        .iter()
+        .map(|node| (node, false))
+        .chain(
+            import_nodes
+                .flatten()
+                .unwrap_or_default()
                 .iter()
-                .filter_map(|item| read_rule(diags, item, &names, &mut ids))
-                .collect::<Vec<_>>()
-        });
+                .map(|node| (node, true)),
+        )
+        .collect();
+    entries.sort_by_key(|(node, _)| yaml::location(node));
+    let mut ids = HashMap::new();
+    let mut rules = Vec::new();
+    let mut import_rules = Vec::new();
+    for (node, is_import) in entries {
+        if is_import {
+            if let Some(rule) = read_import_rule(diags, node, &mut ids) {
+                import_rules.push(rule);
+            }
+        } else if let Some(rule) = read_rule(diags, node, &names, &mut ids) {
+            rules.push(rule);
+        }
+    }
     let (exclude_globs, exclude_set) = yaml::optional(&fields, "exclude", |node| {
         read_globs(diags, node, "`exclude`")
     })
@@ -203,7 +277,8 @@ fn read_config(diags: &mut Diagnostics, node: &Node) -> Option<Config> {
     .unwrap_or_else(|| (Vec::new(), GlobSet::empty()));
     Some(Config {
         vocabularies: vocabularies?.unwrap_or_default(),
-        rules: rules?,
+        rules: rule_nodes.map(|_| rules)?,
+        import_rules: import_nodes.map(|_| import_rules)?,
         excludes: Excludes::new(&exclude_globs, exclude_set),
         exclude_globs,
     })
@@ -268,20 +343,7 @@ fn read_rule(
         "a rule",
         &["id", "include", "target", "patterns"],
     )?;
-    let id = fields.required(diags, "id").and_then(|node| {
-        let id = read_rule_id(diags, node)?;
-        let location = yaml::location(node);
-        match ids.get(id) {
-            Some(line) => diags.error(
-                location,
-                format!("duplicate rule id `{id}` (first used at line {line})"),
-            ),
-            None => {
-                ids.insert(id.to_owned(), location.line);
-            }
-        }
-        Some(id)
-    });
+    let id = read_id(diags, &fields, ids);
     let include = fields
         .required(diags, "include")
         .and_then(|node| read_globs(diags, node, "`include`"));
@@ -299,12 +361,84 @@ fn read_rule(
     });
     let (include_globs, include_set) = include?;
     Some(Rule {
-        id: id?.to_owned(),
+        id: id?,
         target: target?,
         patterns: patterns?,
         location: yaml::location(node),
         include_globs,
         include_set,
+    })
+}
+
+fn read_import_rule(
+    diags: &mut Diagnostics,
+    node: &Node,
+    ids: &mut HashMap<String, usize>,
+) -> Option<ImportRule> {
+    let fields = Fields::new(
+        diags,
+        node,
+        "an import rule",
+        &["id", "include", "internal_namespaces"],
+    )?;
+    let id = read_id(diags, &fields, ids);
+    let include = fields
+        .required(diags, "include")
+        .and_then(|node| read_globs(diags, node, "`include`"));
+    let internal_namespaces = fields
+        .required(diags, "internal_namespaces")
+        .and_then(|node| {
+            let items = yaml::sequence(diags, node, "`internal_namespaces`")?;
+            yaml::all(items.iter().map(|item| {
+                let text = yaml::string(diags, item, "an internal namespace")?;
+                let valid = text.split('.').all(|part| {
+                    let mut chars = part.chars();
+                    chars
+                        .next()
+                        .is_some_and(|c| c.is_alphabetic() || c == '_' || c == '$')
+                        && chars.all(|c| c.is_alphanumeric() || c == '_' || c == '$')
+                });
+                if !valid {
+                    diags.error(
+                        yaml::location(item),
+                        format!(
+                            "invalid internal namespace `{text}`: expected a dot-separated name \
+                         (e.g. `com.example.order`), without wildcards"
+                        ),
+                    );
+                    return None;
+                }
+                Some(text.split('.').map(str::to_owned).collect())
+            }))
+        });
+    let (include_globs, include_set) = include?;
+    Some(ImportRule {
+        id: id?,
+        location: yaml::location(node),
+        include_globs,
+        include_set,
+        internal_namespaces: internal_namespaces?,
+    })
+}
+
+fn read_id(
+    diags: &mut Diagnostics,
+    fields: &Fields<'_, '_>,
+    ids: &mut HashMap<String, usize>,
+) -> Option<String> {
+    fields.required(diags, "id").and_then(|node| {
+        let id = read_rule_id(diags, node)?;
+        let location = yaml::location(node);
+        match ids.get(id) {
+            Some(line) => diags.error(
+                location,
+                format!("duplicate rule id `{id}` (first used at line {line})"),
+            ),
+            None => {
+                ids.insert(id.to_owned(), location.line);
+            }
+        }
+        Some(id.to_owned())
     })
 }
 
@@ -636,10 +770,39 @@ rules:
     }
 
     #[test]
-    fn reports_a_missing_rules_field() {
+    fn requires_at_least_one_rule_list() {
         assert_eq!(
             errors("vocabularies: {}\n"),
-            ["1:1: missing required field `rules` in the configuration"]
+            ["1:1: the configuration must define `rules` or `import_rules`"]
+        );
+        for source in [
+            "rules: []",
+            "import_rules: []",
+            "rules: []\nimport_rules: []",
+        ] {
+            let config = Config::from_yaml_str(source).unwrap();
+            assert!(config.rules.is_empty());
+            assert!(config.import_rules.is_empty());
+        }
+    }
+
+    #[test]
+    fn accepts_import_rules_without_a_naming_rule_list() {
+        let config = Config::from_yaml_str(
+            "import_rules: [{id: domain-imports, include: ['src/**'], internal_namespaces: []}]",
+        )
+        .unwrap();
+        assert!(config.rules.is_empty());
+        assert_eq!(config.import_rules.len(), 1);
+        assert!(config.has_rules_for(Path::new("src/Order.java")));
+        assert!(!config.has_rules_for(Path::new("test/OrderTest.java")));
+    }
+
+    #[test]
+    fn a_valid_import_rule_list_does_not_hide_an_invalid_naming_rule_list() {
+        assert_eq!(
+            errors("rules: null\nimport_rules: []\n"),
+            ["1:8: expected `rules` to be a sequence, found null"]
         );
     }
 
@@ -697,6 +860,179 @@ rules:
         let config = Config::from_yaml_str(EXAMPLE).unwrap();
         assert!(config.exclude_globs().is_empty());
         assert!(!config.excludes().matches(Path::new("anything.java")));
+    }
+
+    #[test]
+    fn import_rules_are_optional_and_may_be_empty() {
+        assert!(
+            Config::from_yaml_str(EXAMPLE)
+                .unwrap()
+                .import_rules
+                .is_empty()
+        );
+        assert!(
+            Config::from_yaml_str("rules: []\nimport_rules: []\n")
+                .unwrap()
+                .import_rules
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn reads_import_rules_and_matches_namespace_components() {
+        let config = Config::from_yaml_str(
+            r#"
+rules: []
+import_rules:
+  - id: domain-imports
+    include: ["src/*/domain/**"]
+    internal_namespaces: [com.example.order, com.example.shared, jp.注文]
+"#,
+        )
+        .unwrap();
+        let rule = &config.import_rules[0];
+        assert_eq!(rule.id, "domain-imports");
+        assert_eq!(rule.location, Location { line: 4, column: 5 });
+        assert_eq!(rule.include_globs(), ["src/*/domain/**"]);
+        assert!(rule.includes(Path::new("src/main/domain/Order.java")));
+        assert!(!rule.includes(Path::new("src/main/java/domain/Order.java")));
+        assert_eq!(rule.internal_namespaces()[0], ["com", "example", "order"]);
+        for namespace in [
+            "com.example.order",
+            "com.example.order.model",
+            "com.example.shared",
+            "jp.注文",
+        ] {
+            let components: Vec<_> = namespace.split('.').map(str::to_owned).collect();
+            assert!(rule.is_internal(&components), "{namespace}");
+        }
+        for namespace in [
+            "com.example",
+            "com.example.ordering",
+            "com.example.Order",
+            "org.other",
+        ] {
+            let components: Vec<_> = namespace.split('.').map(str::to_owned).collect();
+            assert!(!rule.is_internal(&components), "{namespace}");
+        }
+    }
+
+    #[test]
+    fn reports_every_problem_in_import_rules() {
+        let source = r#"
+rules: []
+import_rules:
+  - id: Domain
+    include: []
+    internal_namespaces: ["", "com..example", "com.example.*", "com/example", "com.2example", 42]
+    patterns: ["{noun}"]
+  - id: missing
+    include: ["src/[a"]
+"#;
+        let diagnostics = errors(source);
+        assert_eq!(diagnostics.len(), 11, "{diagnostics:#?}");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.starts_with("4:9: invalid rule id"))
+        );
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d == "5:14: `include` must not be empty")
+        );
+        assert_eq!(
+            diagnostics
+                .iter()
+                .filter(|d| d.contains("invalid internal namespace"))
+                .count(),
+            5
+        );
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.contains("an internal namespace to be a string"))
+        );
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.starts_with("7:5: unknown field `patterns` in an import rule"))
+        );
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.contains("missing required field `internal_namespaces`"))
+        );
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.contains("invalid glob `src/[a`"))
+        );
+    }
+
+    #[test]
+    fn rule_ids_are_unique_across_naming_and_import_rules() {
+        let source = r#"
+rules:
+  - id: domain
+    include: ["**"]
+    target: type
+    patterns: ["{noun}"]
+import_rules:
+  - id: domain
+    include: []
+    internal_namespaces: []
+  - id: domain
+    include: ["**"]
+    internal_namespaces: []
+"#;
+        assert_eq!(
+            errors(source),
+            [
+                "8:9: duplicate rule id `domain` (first used at line 3)",
+                "9:14: `include` must not be empty",
+                "11:9: duplicate rule id `domain` (first used at line 3)",
+            ]
+        );
+    }
+
+    #[test]
+    fn duplicate_ids_point_to_the_first_rule_in_source_order() {
+        let source = r#"
+import_rules:
+  - id: domain
+    include: ['**']
+    internal_namespaces: []
+rules:
+  - id: domain
+    include: ['**']
+    target: type
+    patterns: ['{noun}']
+"#;
+        assert_eq!(
+            errors(source),
+            ["7:9: duplicate rule id `domain` (first used at line 3)"]
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_import_rule_containers() {
+        for (source, expected) in [
+            (
+                "rules: []\nimport_rules: {}",
+                "expected `import_rules` to be a sequence",
+            ),
+            (
+                "rules: []\nimport_rules: [null]",
+                "expected an import rule to be a mapping",
+            ),
+            (
+                "rules: []\nimport_rules: [{id: domain, include: ['**'], internal_namespaces: null}]",
+                "expected `internal_namespaces` to be a sequence",
+            ),
+        ] {
+            assert!(errors(source).iter().any(|d| d.contains(expected)));
+        }
     }
 
     #[test]

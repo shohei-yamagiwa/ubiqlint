@@ -17,6 +17,20 @@ rules:
     patterns: [\"{verb}\"]
 ";
 
+const IMPORT_CONFIG: &str = "\
+import_rules:
+  - id: domain-imports
+    include: ['**/domain/**']
+    internal_namespaces: [com.example]
+";
+
+const INVOICE: &str = "\
+context: billing
+terms:
+  - name: Invoice
+    forms: { singular: invoice, plural: invoices }
+";
+
 const ORDER: &str = "\
 context: order
 terms:
@@ -353,6 +367,155 @@ fn files_outside_every_rule_need_no_dictionary_but_still_get_syntax_checks() {
         out.contains("infrastructure/Utility.java:1:16: error: syntax error:"),
         "{out}"
     );
+}
+
+#[test]
+fn import_only_rules_resolve_sibling_contexts_without_a_root_dictionary() {
+    let project = Project::new();
+    project.write("ubiqlint.yaml", IMPORT_CONFIG);
+    project.write("sales/terms.yaml", ORDER);
+    project.write("billing/terms.yaml", INVOICE);
+    let source = "import com.vendor.Order;\nimport com.vendor.Invoice;\nclass Example {}";
+    project.write("sales/domain/Example.java", source);
+    project.write("billing/domain/Example.java", source);
+
+    let output = project.check(&[]);
+    assert_eq!(output.status.code(), Some(1));
+    let out = stdout(&output);
+    assert_eq!(out.lines().count(), 2, "{out}");
+    assert!(
+        out.contains("sales/domain/Example.java:1:1: error: external import `com.vendor.Order`"),
+        "{out}"
+    );
+    assert!(
+        out.contains("dictionary term `Order` in `sales/terms.yaml`"),
+        "{out}"
+    );
+    assert!(
+        out.contains(
+            "billing/domain/Example.java:2:1: error: external import `com.vendor.Invoice`"
+        ),
+        "{out}"
+    );
+    assert!(
+        out.contains("dictionary term `Invoice` in `billing/terms.yaml`"),
+        "{out}"
+    );
+}
+
+#[test]
+fn import_collisions_use_the_nearest_dictionary_without_inheriting_parent_terms() {
+    let project = Project::new();
+    project.write("ubiqlint.yaml", IMPORT_CONFIG);
+    project.write(
+        "terms.yaml",
+        &format!(
+            "{ORDER}  - name: LineItem\n    forms: {{ singular: line item, plural: line items }}\n"
+        ),
+    );
+    project.write("nested/terms.yaml", INVOICE);
+    project.write("empty/terms.yaml", "context: empty\nterms: []\n");
+    let source = "import com.vendor.Order;\nimport com.vendor.Invoice;\nimport com.vendor.LineItem;\nclass Example {}";
+    project.write("root/domain/Example.java", source);
+    project.write("nested/domain/Example.java", source);
+    project.write("empty/domain/Example.java", source);
+
+    let output = project.check(&[]);
+    assert_eq!(output.status.code(), Some(1));
+    let out = stdout(&output);
+    assert_eq!(out.lines().count(), 3, "{out}");
+    assert!(out.contains("root/domain/Example.java:1:1:"), "{out}");
+    assert!(out.contains("root/domain/Example.java:3:1:"), "{out}");
+    assert!(out.contains("nested/domain/Example.java:2:1:"), "{out}");
+    assert!(
+        out.contains("dictionary term `Invoice` in `nested/terms.yaml`"),
+        "{out}"
+    );
+    assert!(!out.contains("empty/domain/Example.java"), "{out}");
+}
+
+#[test]
+fn import_only_rules_report_resolution_failures_once_and_preserve_syntax_and_exclude_behavior() {
+    let project = Project::new();
+    project.write(
+        "ubiqlint.yaml",
+        &format!("exclude: ['excluded/**']\n{IMPORT_CONFIG}"),
+    );
+    for directory in ["missing", "invalid"] {
+        for name in ["First", "Second"] {
+            project.write(
+                &format!("{directory}/domain/{name}.java"),
+                "import com.vendor.Order; class Example {}",
+            );
+        }
+    }
+    project.write("invalid/terms.yaml", "context: bad\nterms: wrong\n");
+    project.write("syntax/terms.yaml", "context: bad\nterms: wrong\n");
+    project.write(
+        "syntax/domain/Broken.java",
+        "import com.vendor.Order; class Broken {",
+    );
+    project.write("valid/terms.yaml", ORDER);
+    project.write(
+        "valid/domain/Example.java",
+        "import com.vendor.Order; class Example {}",
+    );
+    project.write("unused/terms.yaml", "invalid: dictionary\n");
+    project.write("unused/tools/Utility.java", "class Utility {}");
+    project.write("excluded/terms.yaml", "invalid: dictionary\n");
+    project.write("excluded/domain/Broken.java", "not even Java");
+
+    let output = project.check(&[]);
+    assert_eq!(output.status.code(), Some(1));
+    let out = stdout(&output);
+    assert_eq!(out.lines().count(), 4, "{out}");
+    assert!(
+        out.contains("missing/domain: error: no `terms.yaml` found"),
+        "{out}"
+    );
+    assert!(out.contains("invalid/terms.yaml:2:8: error:"), "{out}");
+    assert!(out.contains("syntax/domain/Broken.java:1:"), "{out}");
+    assert!(out.contains("syntax error:"), "{out}");
+    assert!(
+        out.contains("valid/domain/Example.java:1:1: error: external import"),
+        "{out}"
+    );
+    for absent in ["syntax/terms.yaml", "unused/", "excluded/"] {
+        assert!(!out.contains(absent), "{out}");
+    }
+}
+
+#[test]
+fn explicit_dictionary_overrides_import_contexts_and_bypasses_invalid_automatic_dictionaries() {
+    let project = Project::new();
+    project.write("ubiqlint.yaml", IMPORT_CONFIG);
+    project.write("sales/terms.yaml", ORDER);
+    project.write("shared/custom.yaml", INVOICE);
+    project.write(
+        "sales/domain/Example.java",
+        "import com.vendor.Order;\nimport com.vendor.Invoice;\nclass Example {}",
+    );
+
+    let automatic = project.check(&[]);
+    assert_eq!(automatic.status.code(), Some(1));
+    assert_eq!(stdout(&automatic).lines().count(), 1);
+    assert!(stdout(&automatic).contains("dictionary term `Order` in `sales/terms.yaml`"));
+
+    project.write("terms.yaml", "invalid: root\n");
+    project.write("sales/terms.yaml", "invalid: local\n");
+    let explicit = project.check(&["--dictionary", "shared/custom.yaml"]);
+    assert_eq!(explicit.status.code(), Some(1));
+    let out = stdout(&explicit);
+    assert_eq!(out.lines().count(), 1, "{out}");
+    assert!(
+        out.contains("sales/domain/Example.java:2:1: error: external import `com.vendor.Invoice`"),
+        "{out}"
+    );
+    assert!(
+        out.contains("dictionary term `Invoice` in `shared/custom.yaml`"),
+        "{out}"
+    );
+    assert!(!out.contains("terms.yaml"), "{out}");
 }
 
 #[cfg(unix)]

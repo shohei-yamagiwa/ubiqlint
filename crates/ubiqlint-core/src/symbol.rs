@@ -13,18 +13,19 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::diagnostic::Diagnostic;
 use crate::location::Span;
+use crate::source::SourceFile;
 
-/// Extracts symbols from the source files of one programming language.
+/// Extracts declarations and imports from one programming language.
 pub trait LanguageAdapter {
     /// Returns the file extensions this adapter handles, without the leading
     /// dot, such as `["java"]`.
     fn extensions(&self) -> &[&str];
 
-    /// Extracts the declarations in `source`.
+    /// Extracts the declarations and imports in `source`.
     ///
     /// Returns the syntax errors instead if `source` cannot be parsed, so
     /// that a broken file is not checked against what the parser guessed.
-    fn extract(&self, source: &str) -> Result<Symbols, Vec<Diagnostic>>;
+    fn extract(&self, source: &str) -> Result<SourceFile, Vec<Diagnostic>>;
 }
 
 /// Identifies a symbol within the [`Symbols`] of one file.

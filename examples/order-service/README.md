@@ -23,3 +23,7 @@ src/main/java/com/example/
 ```
 cargo run -p ubiqlint-cli -- check --config examples/order-service/ubiqlint.yaml
 ```
+
+`ubiqlint.yaml` の `import_rules` は、注文と請求それぞれのドメイン層のインポート境界を検査します。注文側は `com.example.order` 以下を内部とし、それ以外から `Order` や `LineItem` をインポートすると違反になります。請求側は `com.example.billing` 以下を内部とし、最も近い請求の辞書にある `Invoice` との衝突を検査します。外部のワイルドカードインポート（`import java.util.*;` など）も違反です。`Order.java` にある `java.util.List` のような、辞書の用語と衝突しない明示的なインポートは許可されます。
+
+同名の外部型を使う場合は、インポートを追加せず `com.vendor.Order` のように完全修飾名で参照します。DTO はこのインポートルールの `include` に含まれないため、対象外です。

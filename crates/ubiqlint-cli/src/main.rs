@@ -233,7 +233,7 @@ fn check(reporter: &mut Reporter, config_path: &Path, dictionary: Option<&Path>)
         for relative in &files {
             if excludes.matches(relative)
                 || adapter_for(relative).is_none()
-                || !config.rules.iter().any(|rule| rule.includes(relative))
+                || !config.has_rules_for(relative)
             {
                 continue;
             }
@@ -264,8 +264,8 @@ fn check(reporter: &mut Reporter, config_path: &Path, dictionary: Option<&Path>)
         let Some(source) = read_file(reporter, &path) else {
             continue;
         };
-        let symbols = match adapter.extract(&source) {
-            Ok(symbols) => symbols,
+        let file = match adapter.extract(&source) {
+            Ok(file) => file,
             Err(diagnostics) => {
                 reporter.diagnostics(&path, &diagnostics);
                 continue;
@@ -273,7 +273,7 @@ fn check(reporter: &mut Reporter, config_path: &Path, dictionary: Option<&Path>)
         };
         // Files outside every rule still get syntax checks, as before, but
         // do not need a domain dictionary merely for being in the tree.
-        if !config.rules.iter().any(|rule| rule.includes(relative)) {
+        if !config.has_rules_for(relative) {
             continue;
         }
         let (dictionary_path, resolved_dictionary) = if let Some(fixed) = &fixed_dictionary {
@@ -311,7 +311,7 @@ fn check(reporter: &mut Reporter, config_path: &Path, dictionary: Option<&Path>)
         let checker = checkers
             .entry(dictionary_path)
             .or_insert_with(|| Checker::new(resolved_dictionary, dictionary_path, &config));
-        let diagnostics = checker.check(&symbols, relative);
+        let diagnostics = checker.check_file(&file, relative);
         reporter.diagnostics(&path, &diagnostics);
     }
     if checked == 0 {

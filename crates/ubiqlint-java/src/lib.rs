@@ -1,7 +1,7 @@
 //! Java language adapter for ubiqlint.
 //!
 //! Parses Java source files with `tree-sitter-java` and describes their
-//! declarations to `ubiqlint-core` as language-agnostic [`Symbols`]:
+//! declarations and imports to `ubiqlint-core` as a [`SourceFile`]:
 //!
 //! | Declaration | Kind |
 //! |---|---|
@@ -26,7 +26,8 @@ mod lexical;
 
 use tree_sitter::{Node, Parser};
 use ubiqlint_core::{
-    Diagnostic, LanguageAdapter, LineIndex, Location, Name, Span, SymbolId, SymbolKind, Symbols,
+    Diagnostic, Import, LanguageAdapter, LineIndex, Location, Name, SourceFile, Span, SymbolId,
+    SymbolKind, Symbols,
 };
 
 use crate::lexical::Translated;
@@ -40,14 +41,14 @@ impl LanguageAdapter for JavaAdapter {
         &["java"]
     }
 
-    fn extract(&self, source: &str) -> Result<Symbols, Vec<Diagnostic>> {
+    fn extract(&self, source: &str) -> Result<SourceFile, Vec<Diagnostic>> {
         extract(source)
     }
 }
 
-/// Extracts the declarations in a Java source file, or returns its syntax
-/// errors, including malformed Unicode escapes.
-pub fn extract(source: &str) -> Result<Symbols, Vec<Diagnostic>> {
+/// Extracts declarations and imports from a Java source file, or returns
+/// its syntax errors, including malformed Unicode escapes.
+pub fn extract(source: &str) -> Result<SourceFile, Vec<Diagnostic>> {
     let mut parser = Parser::new();
     parser
         .set_language(&tree_sitter_java::LANGUAGE.into())
@@ -75,9 +76,13 @@ pub fn extract(source: &str) -> Result<Symbols, Vec<Diagnostic>> {
     let mut extractor = Extractor {
         source,
         symbols: Symbols::new(),
+        imports: Vec::new(),
     };
     extractor.walk(root);
-    Ok(extractor.symbols)
+    Ok(SourceFile {
+        symbols: extractor.symbols,
+        imports: extractor.imports,
+    })
 }
 
 /// A source file as the parser sees it, with a way back to the file as
@@ -152,6 +157,7 @@ fn syntax_errors(root: Node, source: &Source) -> Vec<Diagnostic> {
 struct Extractor<'a> {
     source: Source<'a>,
     symbols: Symbols,
+    imports: Vec<Import>,
 }
 
 impl Extractor<'_> {
@@ -177,6 +183,10 @@ impl Extractor<'_> {
     /// encloses the children of `node`.
     fn visit(&mut self, node: Node, parent: Option<SymbolId>) -> Option<SymbolId> {
         match node.kind() {
+            "import_declaration" => {
+                self.imports.push(self.import(node));
+                parent
+            }
             "class_declaration"
             | "interface_declaration"
             | "enum_declaration"
@@ -241,6 +251,34 @@ impl Extractor<'_> {
                 parent
             }
             _ => parent,
+        }
+    }
+
+    /// Reads the identifier leaves instead of splitting the declaration's
+    /// text, since comments and whitespace may appear around every dot.
+    /// Static imports introduce the final name just like ordinary imports;
+    /// without a classpath it may be a nested type, a field or a method.
+    fn import(&self, node: Node) -> Import {
+        let mut path = Vec::new();
+        let mut wildcard = false;
+        let mut stack = vec![node];
+        let mut cursor = node.walk();
+        let mut children = Vec::new();
+        while let Some(node) = stack.pop() {
+            match node.kind() {
+                "identifier" => path.push(self.source.text(node).to_owned()),
+                "asterisk" => wildcard = true,
+                "import_declaration" | "scoped_identifier" => {
+                    children.extend(node.named_children(&mut cursor));
+                    stack.extend(children.drain(..).rev());
+                }
+                _ => {}
+            }
+        }
+        Import {
+            path,
+            wildcard,
+            span: self.span(node),
         }
     }
 
