@@ -69,10 +69,12 @@ pub fn extract(source: &str) -> Result<Symbols, Vec<Diagnostic>> {
 fn syntax_errors(root: Node, lines: &LineIndex) -> Vec<Diagnostic> {
     let mut errors = Vec::new();
     let mut stack = vec![root];
+    let mut cursor = root.walk();
+    let mut nested = Vec::new();
     while let Some(node) = stack.pop() {
         // Missing tokens such as `;` are anonymous, so look at every child.
-        let mut cursor = node.walk();
-        let nested: Vec<Node> = node.children(&mut cursor).filter(Node::has_error).collect();
+        nested.clear();
+        nested.extend(node.children(&mut cursor).filter(Node::has_error));
         let message = if node.is_missing() {
             if node.is_named() {
                 format!("syntax error: missing {}", node.kind().replace('_', " "))
@@ -82,7 +84,7 @@ fn syntax_errors(root: Node, lines: &LineIndex) -> Vec<Diagnostic> {
         } else if node.is_error() && nested.is_empty() {
             "syntax error".to_owned()
         } else {
-            stack.extend(nested.into_iter().rev());
+            stack.extend(nested.drain(..).rev());
             continue;
         };
         errors.push(Diagnostic {
@@ -113,14 +115,16 @@ impl Extractor<'_> {
     /// expressions could otherwise overflow the call stack.
     fn walk(&mut self, root: Node) {
         let mut stack = vec![(root, None)];
+        // Reused for every node, to avoid allocating for each one.
+        let mut cursor = root.walk();
+        let mut children = Vec::new();
         while let Some((node, parent)) = stack.pop() {
             let scope = self.visit(node, parent);
             // Push in reverse, so that popping visits children in source
             // order. Anonymous nodes are tokens such as `{`, which declare
             // nothing.
-            let mut cursor = node.walk();
-            let children: Vec<Node> = node.named_children(&mut cursor).collect();
-            stack.extend(children.into_iter().rev().map(|child| (child, scope)));
+            children.extend(node.named_children(&mut cursor));
+            stack.extend(children.drain(..).rev().map(|child| (child, scope)));
         }
     }
 
