@@ -636,6 +636,27 @@ fn translates_unicode_escapes_before_parsing() {
 }
 
 #[test]
+fn counts_backslashes_produced_by_escapes() {
+    // The escaped backslash and the raw one make a pair, so the last escape
+    // is a line feed and the class is code, as javac 21 reads it.
+    let source = r"// \u005c\\u000aclass Parity { int total; }";
+    assert_eq!(outline(source), lines("type Parity\n  field total"));
+}
+
+#[test]
+fn reports_malformed_unicode_escapes() {
+    // Java rejects a malformed escape even in a comment.
+    let errors = extract("// \\u00G1\nclass Malformed { int total; }").unwrap_err();
+    let errors: Vec<String> = errors.iter().map(ToString::to_string).collect();
+    assert_eq!(
+        errors,
+        ["1:4: invalid Unicode escape: `\\u` must be followed by four hexadecimal digits"]
+    );
+    // A backslash that cannot start an escape is fine.
+    assert_eq!(outline("// \\\\u00G1\nclass Fine {}"), lines("type Fine"));
+}
+
+#[test]
 fn locates_syntax_errors_after_unicode_escapes() {
     let errors = extract(r"class \u004frder { int total }").unwrap_err();
     let errors: Vec<String> = errors.iter().map(ToString::to_string).collect();

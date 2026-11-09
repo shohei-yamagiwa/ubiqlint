@@ -46,16 +46,25 @@ impl LanguageAdapter for JavaAdapter {
 }
 
 /// Extracts the declarations in a Java source file, or returns its syntax
-/// errors.
+/// errors, including malformed Unicode escapes.
 pub fn extract(source: &str) -> Result<Symbols, Vec<Diagnostic>> {
     let mut parser = Parser::new();
     parser
         .set_language(&tree_sitter_java::LANGUAGE.into())
         .expect("the Java grammar is compatible with tree-sitter");
-    let source = Source {
-        translated: Translated::new(source),
-        lines: LineIndex::new(source),
-    };
+    let lines = LineIndex::new(source);
+    let translated = Translated::new(source).map_err(|malformed| {
+        malformed
+            .iter()
+            .map(|escape| Diagnostic {
+                location: lines.location(escape.offset),
+                message:
+                    "invalid Unicode escape: `\\u` must be followed by four hexadecimal digits"
+                        .to_owned(),
+            })
+            .collect::<Vec<_>>()
+    })?;
+    let source = Source { translated, lines };
     let tree = parser
         .parse(source.translated.text(), None)
         .expect("parsing without a timeout or cancellation always succeeds");
