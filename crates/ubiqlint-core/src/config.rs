@@ -105,14 +105,12 @@ fn read_config(diags: &mut Diagnostics, node: &Node) -> Option<Config> {
         .required(diags, "rules")
         .and_then(|node| yaml::sequence(diags, node, "`rules`"))
         .map(|items| {
+            let mut ids = HashMap::new();
             items
                 .iter()
-                .filter_map(|item| read_rule(diags, item, &names))
+                .filter_map(|item| read_rule(diags, item, &names, &mut ids))
                 .collect::<Vec<_>>()
         });
-    if let Some(rules) = &rules {
-        check_unique_rules(diags, rules);
-    }
     Some(Config {
         vocabularies: vocabularies?.unwrap_or_default(),
         rules: rules?,
@@ -163,16 +161,35 @@ fn read_vocabularies(
     (!failed).then_some(vocabularies)
 }
 
-fn read_rule(diags: &mut Diagnostics, node: &Node, vocabularies: &[String]) -> Option<Rule> {
+/// Reads a rule. `ids` holds the ids of the rules read so far, with the line
+/// of each, so that a repeated id is reported even if the rest of the rule is
+/// invalid.
+fn read_rule(
+    diags: &mut Diagnostics,
+    node: &Node,
+    vocabularies: &[String],
+    ids: &mut HashMap<String, usize>,
+) -> Option<Rule> {
     let fields = Fields::new(
         diags,
         node,
         "a rule",
         &["id", "include", "target", "patterns"],
     )?;
-    let id = fields
-        .required(diags, "id")
-        .and_then(|node| read_rule_id(diags, node));
+    let id = fields.required(diags, "id").and_then(|node| {
+        let id = read_rule_id(diags, node)?;
+        let location = yaml::location(node);
+        match ids.get(id) {
+            Some(line) => diags.error(
+                location,
+                format!("duplicate rule id `{id}` (first used at line {line})"),
+            ),
+            None => {
+                ids.insert(id.to_owned(), location.line);
+            }
+        }
+        Some(id)
+    });
     let include = fields
         .required(diags, "include")
         .and_then(|node| read_include(diags, node));
@@ -283,25 +300,6 @@ fn is_snake_case(name: &str) -> bool {
     let mut chars = name.chars();
     chars.next().is_some_and(|c| c.is_ascii_lowercase())
         && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
-}
-
-/// Reports rules whose id is already used by an earlier rule.
-fn check_unique_rules(diags: &mut Diagnostics, rules: &[Rule]) {
-    let mut ids: HashMap<&str, &Rule> = HashMap::new();
-    for rule in rules {
-        match ids.get(rule.id.as_str()) {
-            Some(first) => diags.error(
-                rule.location,
-                format!(
-                    "duplicate rule id `{}` (first used at line {})",
-                    rule.id, first.location.line
-                ),
-            ),
-            None => {
-                ids.insert(&rule.id, rule);
-            }
-        }
-    }
 }
 
 #[cfg(test)]
@@ -513,9 +511,32 @@ rules:
         assert_eq!(
             errors(source),
             [
-                "7:5: duplicate rule id `domain` (first used at line 3)",
+                "7:9: duplicate rule id `domain` (first used at line 3)",
                 "11:5: unknown field `exclude` in a rule, expected one of \
                  `id`, `include`, `target`, `patterns`",
+            ]
+        );
+    }
+
+    #[test]
+    fn reports_duplicate_rule_ids_in_otherwise_invalid_rules() {
+        let source = r#"
+rules:
+  - id: domain
+    include: ["**/domain/**"]
+    target: type
+    patterns: ["{noun}"]
+  - id: domain
+    include: ["**/domain/**"]
+    target: class
+    patterns: ["{verb}"]
+"#;
+        assert_eq!(
+            errors(source),
+            [
+                "7:9: duplicate rule id `domain` (first used at line 3)",
+                "9:13: unknown target `class`, expected one of \
+                 `type`, `method`, `field`, `parameter`, `variable`",
             ]
         );
     }

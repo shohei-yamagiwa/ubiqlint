@@ -83,30 +83,98 @@ fn read_dictionary(diags: &mut Diagnostics, node: &Node) -> Option<Dictionary> {
         .required(diags, "terms")
         .and_then(|node| yaml::sequence(diags, node, "`terms`"))
         .map(|items| {
+            let mut seen = Seen::default();
             items
                 .iter()
-                .filter_map(|item| read_term(diags, item))
+                .filter_map(|item| read_term(diags, item, &mut seen))
                 .collect::<Vec<_>>()
         });
-    if let Some(terms) = &terms {
-        check_unique_terms(diags, terms);
-    }
     Some(Dictionary {
         context: context?.to_owned(),
         terms: terms?,
     })
 }
 
-fn read_term(diags: &mut Diagnostics, node: &Node) -> Option<Term> {
+/// Term names and noun forms read so far.
+///
+/// Each value is registered as soon as it is read, so that a clash is
+/// reported even when other fields of the same term are invalid.
+#[derive(Default)]
+struct Seen {
+    /// Lowercased term names, with the line that first defined each.
+    names: HashMap<String, usize>,
+    /// Noun forms, with the name of the term that uses each (if valid) and
+    /// the line it appears on.
+    forms: HashMap<Words, (Option<String>, usize)>,
+}
+
+impl Seen {
+    /// Registers a term name, returning `false` if an earlier term already
+    /// has it.
+    fn add_name(&mut self, diags: &mut Diagnostics, name: &str, location: Location) -> bool {
+        let key = name.to_ascii_lowercase();
+        if let Some(line) = self.names.get(&key) {
+            diags.error(
+                location,
+                format!("duplicate term `{name}` (first defined at line {line})"),
+            );
+            return false;
+        }
+        self.names.insert(key, location.line);
+        true
+    }
+
+    /// Registers the noun forms of one term, reporting any form an earlier
+    /// term already uses.
+    fn add_forms(
+        &mut self,
+        diags: &mut Diagnostics,
+        owner: Option<&str>,
+        forms: [Option<&(Words, Location)>; 2],
+    ) {
+        let mut own: Vec<&Words> = Vec::new();
+        for (form, location) in forms.into_iter().flatten() {
+            // A term may use the same words for its singular and plural, as
+            // `data` does.
+            if own.contains(&form) {
+                continue;
+            }
+            own.push(form);
+            match self.forms.get(form) {
+                Some((other, line)) => {
+                    let other = other.as_ref().map_or_else(
+                        || "another term".to_owned(),
+                        |name| format!("term `{name}`"),
+                    );
+                    diags.error(
+                        *location,
+                        format!("the form `{form}` is already used by {other} (line {line})"),
+                    );
+                }
+                None => {
+                    self.forms
+                        .insert(form.clone(), (owner.map(str::to_owned), location.line));
+                }
+            }
+        }
+    }
+}
+
+fn read_term(diags: &mut Diagnostics, node: &Node, seen: &mut Seen) -> Option<Term> {
     let fields = Fields::new(
         diags,
         node,
         "a term",
         &["name", "kind", "ja", "description", "forms", "behaviors"],
     )?;
-    let name = fields
-        .required(diags, "name")
-        .and_then(|node| read_term_name(diags, node));
+    let name_node = fields.required(diags, "name");
+    let name = name_node.and_then(|node| read_term_name(diags, node));
+    // A term that repeats an earlier name is reported once, for its name,
+    // rather than again for each of its forms.
+    let is_new_name = match (name, name_node) {
+        (Some(name), Some(node)) => seen.add_name(diags, name, yaml::location(node)),
+        _ => true,
+    };
     let kind = yaml::optional(&fields, "kind", |node| {
         yaml::non_empty_string(diags, node, "`kind`")
     });
@@ -116,27 +184,32 @@ fn read_term(diags: &mut Diagnostics, node: &Node) -> Option<Term> {
     let description = yaml::optional(&fields, "description", |node| {
         yaml::non_empty_string(diags, node, "`description`")
     });
-    let forms = fields
-        .required(diags, "forms")
-        .and_then(|node| read_noun_forms(diags, node));
+    let forms = fields.required(diags, "forms").and_then(|node| {
+        let (singular, plural) = read_noun_forms(diags, node)?;
+        if is_new_name {
+            seen.add_forms(diags, name, [singular.as_ref(), plural.as_ref()]);
+        }
+        Some(NounForms {
+            singular: singular?.0,
+            plural: plural?.0,
+        })
+    });
     let behaviors = yaml::optional(&fields, "behaviors", |node| {
         yaml::sequence(diags, node, "`behaviors`").map(|items| {
+            let mut verbs = HashMap::new();
             items
                 .iter()
-                .filter_map(|item| read_behavior(diags, item))
+                .filter_map(|item| read_behavior(diags, item, &mut verbs))
                 .collect::<Vec<_>>()
         })
     });
-    let name = name?;
-    let behaviors = behaviors?.unwrap_or_default();
-    check_unique_behaviors(diags, name, &behaviors);
     Some(Term {
-        name: name.to_owned(),
+        name: name?.to_owned(),
         kind: kind?.map(str::to_owned),
         ja: ja?.map(str::to_owned),
         description: description?.map(str::to_owned),
         forms: forms?,
-        behaviors,
+        behaviors: behaviors?.unwrap_or_default(),
         location: yaml::location(node),
     })
 }
@@ -159,58 +232,86 @@ fn read_term_name<'a>(diags: &mut Diagnostics, node: &'a Node) -> Option<&'a str
     Some(name)
 }
 
-fn read_noun_forms(diags: &mut Diagnostics, node: &Node) -> Option<NounForms> {
+type LocatedWords = (Words, Location);
+
+/// Reads the singular and plural forms, each with its location. Returns
+/// `None` only if `node` is not a mapping.
+fn read_noun_forms(
+    diags: &mut Diagnostics,
+    node: &Node,
+) -> Option<(Option<LocatedWords>, Option<LocatedWords>)> {
     let fields = Fields::new(diags, node, "`forms` of a term", &["singular", "plural"])?;
-    let singular = fields
-        .required(diags, "singular")
-        .and_then(|node| yaml::words(diags, node, "`singular`"));
-    let plural = fields
-        .required(diags, "plural")
-        .and_then(|node| yaml::words(diags, node, "`plural`"));
-    Some(NounForms {
-        singular: singular?,
-        plural: plural?,
-    })
+    let mut form = |name: &str| {
+        fields.required(diags, name).and_then(|node| {
+            yaml::words(diags, node, &format!("`{name}`"))
+                .map(|words| (words, yaml::location(node)))
+        })
+    };
+    let singular = form("singular");
+    let plural = form("plural");
+    Some((singular, plural))
 }
 
-fn read_behavior(diags: &mut Diagnostics, node: &Node) -> Option<Behavior> {
+/// Reads a behavior. `verbs` holds the verbs already defined on the same
+/// term, with the line of each.
+fn read_behavior(
+    diags: &mut Diagnostics,
+    node: &Node,
+    verbs: &mut HashMap<Words, usize>,
+) -> Option<Behavior> {
     let fields = Fields::new(diags, node, "a behavior", &["verb", "forms"])?;
-    let verb = fields
-        .required(diags, "verb")
-        .and_then(|node| yaml::words(diags, node, "`verb`"));
+    let verb = fields.required(diags, "verb").and_then(|node| {
+        let verb = yaml::words(diags, node, "`verb`")?;
+        let location = yaml::location(node);
+        match verbs.get(&verb) {
+            Some(line) => diags.error(
+                location,
+                format!("duplicate behavior `{verb}` (first defined at line {line})"),
+            ),
+            None => {
+                verbs.insert(verb.clone(), location.line);
+            }
+        }
+        Some(verb)
+    });
     let forms = fields
         .required(diags, "forms")
-        .and_then(|node| read_verb_forms(diags, node));
-    let (verb, forms) = (verb?, forms?);
-    if forms.base != verb {
-        diags.error(
-            yaml::location(node),
-            format!(
-                "`forms.base` (`{}`) must be the same as `verb` (`{verb}`)",
-                forms.base
-            ),
-        );
-    }
+        .and_then(|node| read_verb_forms(diags, node, verb.as_ref()));
     Some(Behavior {
-        verb,
-        forms,
+        verb: verb?,
+        forms: forms?,
         location: yaml::location(node),
     })
 }
 
-fn read_verb_forms(diags: &mut Diagnostics, node: &Node) -> Option<VerbForms> {
+/// Reads the forms of a verb, reporting a base form that differs from
+/// `verb` when both could be read.
+fn read_verb_forms(
+    diags: &mut Diagnostics,
+    node: &Node,
+    verb: Option<&Words>,
+) -> Option<VerbForms> {
     let fields = Fields::new(
         diags,
         node,
         "`forms` of a behavior",
         &["base", "s", "past", "pp", "ing"],
     )?;
+    let base = fields.required(diags, "base").and_then(|node| {
+        let base = yaml::words(diags, node, "`base`")?;
+        if let Some(verb) = verb.filter(|verb| **verb != base) {
+            diags.error(
+                yaml::location(node),
+                format!("`forms.base` (`{base}`) must be the same as `verb` (`{verb}`)"),
+            );
+        }
+        Some(base)
+    });
     let mut form = |name: &str| {
         fields
             .required(diags, name)
             .and_then(|node| yaml::words(diags, node, &format!("`{name}`")))
     };
-    let base = form("base");
     let s = form("s");
     let past = form("past");
     let pp = form("pp");
@@ -222,63 +323,6 @@ fn read_verb_forms(diags: &mut Diagnostics, node: &Node) -> Option<VerbForms> {
         pp: pp?,
         ing: ing?,
     })
-}
-
-/// Reports terms whose names or noun forms clash with an earlier term.
-fn check_unique_terms(diags: &mut Diagnostics, terms: &[Term]) {
-    let mut names: HashMap<String, &Term> = HashMap::new();
-    let mut forms: HashMap<&Words, &Term> = HashMap::new();
-    for term in terms {
-        if let Some(first) = names.get(&term.name.to_ascii_lowercase()) {
-            diags.error(
-                term.location,
-                format!(
-                    "duplicate term `{}` (first defined at line {})",
-                    term.name, first.location.line
-                ),
-            );
-            continue;
-        }
-        names.insert(term.name.to_ascii_lowercase(), term);
-
-        let mut own_forms = vec![&term.forms.singular];
-        if term.forms.plural != term.forms.singular {
-            own_forms.push(&term.forms.plural);
-        }
-        for form in own_forms {
-            match forms.get(form) {
-                Some(other) => diags.error(
-                    term.location,
-                    format!(
-                        "the form `{form}` of term `{}` is already used by term `{}` (line {})",
-                        term.name, other.name, other.location.line
-                    ),
-                ),
-                None => {
-                    forms.insert(form, term);
-                }
-            }
-        }
-    }
-}
-
-/// Reports behaviors defined more than once on the same term.
-fn check_unique_behaviors(diags: &mut Diagnostics, term: &str, behaviors: &[Behavior]) {
-    let mut verbs: HashMap<&Words, &Behavior> = HashMap::new();
-    for behavior in behaviors {
-        match verbs.get(&behavior.verb) {
-            Some(first) => diags.error(
-                behavior.location,
-                format!(
-                    "duplicate behavior `{}` on term `{term}` (first defined at line {})",
-                    behavior.verb, first.location.line
-                ),
-            ),
-            None => {
-                verbs.insert(&behavior.verb, behavior);
-            }
-        }
-    }
 }
 
 #[cfg(test)]
@@ -417,7 +461,7 @@ terms:
 ";
         assert_eq!(
             errors(source),
-            ["6:9: `forms.base` (`placing`) must be the same as `verb` (`place`)"]
+            ["7:24: `forms.base` (`placing`) must be the same as `verb` (`place`)"]
         );
     }
 
@@ -461,9 +505,60 @@ terms:
         assert_eq!(
             errors(source),
             [
-                "8:9: duplicate behavior `place` on term `Order` (first defined at line 6)",
-                "10:5: duplicate term `order` (first defined at line 3)",
-                "12:5: the form `orders` of term `Purchase` is already used by term `Order` (line 3)",
+                "8:15: duplicate behavior `place` (first defined at line 6)",
+                "10:11: duplicate term `order` (first defined at line 3)",
+                "13:48: the form `orders` is already used by term `Order` (line 4)",
+            ]
+        );
+    }
+
+    #[test]
+    fn reports_clashes_in_terms_with_other_invalid_fields() {
+        let source = "\
+context: order
+terms:
+  - name: Order
+    forms: { singular: order, plural: orders }
+  - name: Order
+    forms: { singular: order }
+  - name: Purchase
+    kind: ''
+    forms: { singular: purchase, plural: orders }
+";
+        assert_eq!(
+            errors(source),
+            [
+                "5:11: duplicate term `Order` (first defined at line 3)",
+                "6:12: missing required field `plural` in `forms` of a term",
+                "8:11: `kind` must not be empty",
+                "9:42: the form `orders` is already used by term `Order` (line 4)",
+            ]
+        );
+    }
+
+    #[test]
+    fn reports_clashes_in_behaviors_with_incomplete_forms() {
+        let source = "\
+context: order
+terms:
+  - name: Order
+    forms: { singular: order, plural: orders }
+    behaviors:
+      - verb: place
+        forms: { base: placing, s: places, past: placed, ing: placing }
+      - verb: place
+        forms: { base: place }
+";
+        assert_eq!(
+            errors(source),
+            [
+                "7:16: missing required field `pp` in `forms` of a behavior",
+                "7:24: `forms.base` (`placing`) must be the same as `verb` (`place`)",
+                "8:15: duplicate behavior `place` (first defined at line 6)",
+                "9:16: missing required field `s` in `forms` of a behavior",
+                "9:16: missing required field `past` in `forms` of a behavior",
+                "9:16: missing required field `pp` in `forms` of a behavior",
+                "9:16: missing required field `ing` in `forms` of a behavior",
             ]
         );
     }
