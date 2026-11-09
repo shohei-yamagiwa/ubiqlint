@@ -121,7 +121,7 @@ impl<'a> Checker<'a> {
             let enclosing = self.enclosing_term(symbols, symbol);
             for rule in rules {
                 if let Some(diagnostic) =
-                    self.check_symbol(symbols, symbol, rule, &words, enclosing)
+                    self.check_symbol(symbols, symbol, name, rule, &words, enclosing)
                 {
                     diagnostics.push(diagnostic);
                 }
@@ -137,14 +137,11 @@ impl<'a> Checker<'a> {
         &self,
         symbols: &Symbols,
         symbol: &Symbol,
+        name: &Name,
         rule: &Rule,
         words: &[String],
         enclosing: Option<usize>,
     ) -> Option<Diagnostic> {
-        let name = symbol
-            .name
-            .as_ref()
-            .expect("only named symbols are checked");
         if words.is_empty() {
             // No pattern can match an identifier without words, and it can
             // never become a term, so say so instead of listing patterns.
@@ -161,7 +158,7 @@ impl<'a> Checker<'a> {
                 return None;
             }
         }
-        Some(self.describe(symbols, symbol, rule, words, enclosing))
+        Some(self.describe(symbols, symbol, name, rule, words, enclosing))
     }
 
     /// Builds the violation for an identifier that matched no pattern,
@@ -172,14 +169,11 @@ impl<'a> Checker<'a> {
         &self,
         symbols: &Symbols,
         symbol: &Symbol,
+        name: &Name,
         rule: &Rule,
         words: &[String],
         enclosing: Option<usize>,
     ) -> Diagnostic {
-        let name = symbol
-            .name
-            .as_ref()
-            .expect("only named symbols are checked");
         let mut nearest: Option<(&Pattern, Vec<Binding>, usize)> = None;
         for pattern in &rule.patterns {
             if let Some(bindings) = self.attempt(pattern, words, enclosing, true) {

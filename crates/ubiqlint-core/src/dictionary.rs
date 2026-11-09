@@ -81,7 +81,7 @@ impl VerbForms {
 
     /// Returns every form's words, in the order of [`VerbForm::ALL`].
     pub fn all(&self) -> [&Words; 5] {
-        [&self.base, &self.s, &self.past, &self.pp, &self.ing]
+        VerbForm::ALL.map(|form| self.get(form))
     }
 }
 

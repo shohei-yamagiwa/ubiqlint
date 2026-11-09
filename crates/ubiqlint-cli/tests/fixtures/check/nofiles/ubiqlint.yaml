@@ -1,6 +1,6 @@
 rules:
   - id: domain-method
-    include: ["linked/**"]
+    include: ["src/**"]
     target: method
     patterns:
       - "{verb}"

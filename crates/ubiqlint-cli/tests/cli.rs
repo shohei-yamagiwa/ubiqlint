@@ -1,3 +1,4 @@
+use std::fs;
 use std::process::{Command, Output};
 
 /// Runs `ubiqlint` from the crate directory so fixture paths stay short.
@@ -241,20 +242,45 @@ fn check_respects_gitignore() {
     assert_eq!(stdout(&output), "");
 }
 
+// A symlink committed to git becomes a plain file on Windows checkouts
+// (core.symlinks=false), so the link is created at test time instead.
+#[cfg(unix)]
 #[test]
 fn check_follows_symlinks() {
-    let output = ubiqlint(&[
-        "check",
-        "--config",
-        "tests/fixtures/check/symlinked/ubiqlint.yaml",
-    ]);
+    use std::os::unix::fs::symlink;
+
+    let dir = std::env::temp_dir().join(format!("ubiqlint-check-symlink-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(dir.join("real")).unwrap();
+    fs::create_dir_all(dir.join("linked")).unwrap();
+    fs::write(
+        dir.join("ubiqlint.yaml"),
+        "rules:\n  - id: domain-method\n    include: [\"linked/**\"]\n    target: method\n    patterns:\n      - \"{verb}\"\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("terms.yaml"),
+        "context: order\nterms:\n  - name: Order\n    forms: { singular: order, plural: orders }\n    behaviors:\n      - verb: place\n        forms: { base: place, s: places, past: placed, pp: placed, ing: placing }\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("real/Bad.java"),
+        "public class Bad {\n    public void update() {\n    }\n}\n",
+    )
+    .unwrap();
+    symlink("../real/Bad.java", dir.join("linked/Bad.java")).unwrap();
+
+    let config = dir.join("ubiqlint.yaml");
+    let output = ubiqlint(&["check", "--config", config.to_str().unwrap()]);
+    let _ = fs::remove_dir_all(&dir);
 
     assert_eq!(output.status.code(), Some(1));
-    assert_eq!(
-        stdout(&output),
-        "tests/fixtures/check/symlinked/linked/Bad.java:2:17: error: `update` does not match \
-         pattern `{verb}` of rule `domain-method`: `{verb}` is not bound to a term: the enclosing \
-         type `Bad` is not in the dictionary\n"
+    let out = stdout(&output);
+    assert!(
+        out.contains(
+            "linked/Bad.java:2:17: error: `update` does not match pattern `{verb}` of rule `domain-method`"
+        ),
+        "unexpected output: {out}"
     );
 }
 
@@ -272,6 +298,60 @@ fn check_reports_a_file_that_is_not_utf8_and_keeps_going() {
         "tests/fixtures/check/nonutf8/src/Legacy.java: error: cannot read the file: \
          stream did not contain valid UTF-8\n"
     );
+}
+
+#[test]
+fn check_warns_when_no_source_files_were_checked() {
+    let output = ubiqlint(&[
+        "check",
+        "--config",
+        "tests/fixtures/check/nofiles/ubiqlint.yaml",
+    ]);
+
+    assert!(output.status.success());
+    assert_eq!(stdout(&output), "warning: no source files were checked\n");
+}
+
+// Symlink loops and dangling links can only be created at test time.
+#[cfg(unix)]
+#[test]
+fn check_ignores_walk_errors_under_excluded_paths_and_non_sources() {
+    use std::os::unix::fs::symlink;
+
+    let dir = std::env::temp_dir().join(format!("ubiqlint-check-walkerr-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::create_dir_all(dir.join("legacy")).unwrap();
+    fs::write(
+        dir.join("ubiqlint.yaml"),
+        "exclude: [\"legacy/**\"]\nrules:\n  - id: domain-method\n    include: [\"src/**\"]\n    target: method\n    patterns:\n      - \"{verb}\"\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("terms.yaml"),
+        "context: order\nterms:\n  - name: Order\n    forms: { singular: order, plural: orders }\n    behaviors:\n      - verb: place\n        forms: { base: place, s: places, past: placed, pp: placed, ing: placing }\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("src/Order.java"),
+        "public class Order {\n    public void place() {\n    }\n}\n",
+    )
+    .unwrap();
+    // A symlink loop inside the excluded directory, and a dangling
+    // non-source link in the checked tree: neither may fail the run.
+    symlink(".", dir.join("legacy/loop")).unwrap();
+    symlink("nowhere", dir.join("src/README")).unwrap();
+
+    let config = dir.join("ubiqlint.yaml");
+    let output = ubiqlint(&["check", "--config", config.to_str().unwrap()]);
+    let _ = fs::remove_dir_all(&dir);
+
+    assert!(
+        output.status.success(),
+        "unexpected output: {}",
+        stdout(&output)
+    );
+    assert_eq!(stdout(&output), "");
 }
 
 #[test]

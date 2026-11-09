@@ -73,14 +73,18 @@ impl Reporter {
         }
     }
 
-    /// Prints one line, unless the pipe is already broken.
-    fn line(&mut self, text: &str) {
+    /// Prints one line, returning whether the pipe still accepts writes.
+    fn line(&mut self, text: &str) -> bool {
         if self.broken {
-            return;
+            return false;
         }
-        if writeln!(self.out, "{text}").is_err() {
-            self.broken = true;
-            self.failed = true;
+        match writeln!(self.out, "{text}") {
+            Ok(()) => true,
+            Err(_) => {
+                self.broken = true;
+                self.failed = true;
+                false
+            }
         }
     }
 
@@ -90,8 +94,17 @@ impl Reporter {
         self.line(text);
     }
 
+    /// Tells whether the pipe is broken, so callers can stop early instead
+    /// of doing a whole run's work into a closed pipe.
+    fn broken(&self) -> bool {
+        self.broken
+    }
+
     fn finish(mut self) -> ExitCode {
-        let _ = self.out.flush();
+        // A large output can still fail here, when the buffer is flushed.
+        if self.out.flush().is_err() {
+            self.failed = true;
+        }
         if self.failed {
             ExitCode::FAILURE
         } else {
@@ -146,7 +159,11 @@ fn check(reporter: &mut Reporter, config_path: &Path, dictionary: Option<&Path>)
     };
 
     let checker = Checker::new(&dictionary, &config);
-    for relative in collect_files(reporter, read_root) {
+    let mut checked = 0;
+    for relative in collect_files(reporter, read_root, root, &config) {
+        if reporter.broken() {
+            break;
+        }
         if config.excludes(&relative) {
             continue;
         }
@@ -161,6 +178,7 @@ fn check(reporter: &mut Reporter, config_path: &Path, dictionary: Option<&Path>)
         }) else {
             continue;
         };
+        checked += 1;
         let shown = root.join(&relative).display().to_string();
         let source = match fs::read_to_string(read_root.join(&relative)) {
             Ok(source) => source,
@@ -190,28 +208,85 @@ fn check(reporter: &mut Reporter, config_path: &Path, dictionary: Option<&Path>)
             }
         }
     }
+    if checked == 0 {
+        // Distinguish "no violations" from "nothing was checked", which CI
+        // and hooks would otherwise not see.
+        reporter.line("warning: no source files were checked");
+    }
 }
 
 /// Collects the paths of all files under `read_root`, relative to it and
-/// sorted. `.gitignore` (and `.ignore`, `.git/info/exclude`, parent
-/// directories' `.gitignore`) are respected even outside a git repository,
-/// hidden files such as `.git` are skipped, and symlinks are followed.
-/// Walk errors are reported, since silently skipping a directory would hide
-/// violations.
-fn collect_files(reporter: &mut Reporter, read_root: &Path) -> Vec<PathBuf> {
-    let walker = WalkBuilder::new(read_root)
+/// sorted, displayed by joining them onto `root`. `.gitignore` (and
+/// `.ignore`, `.git/info/exclude`) are respected with git's own boundary:
+/// inside a repository, `.gitignore` files above it do not apply; outside
+/// one (a tarball), only the ones inside the tree do. Hidden files such as
+/// `.git` are skipped, symlinks are followed, and directories the
+/// configuration `exclude`s are never descended into.
+///
+/// Walk errors are reported with the failed path first, since silently
+/// skipping a directory would hide violations. Errors under an excluded
+/// path, or on files no adapter handles, are not reported: they are not
+/// ours to check.
+fn collect_files(
+    reporter: &mut Reporter,
+    read_root: &Path,
+    root: &Path,
+    config: &Config,
+) -> Vec<PathBuf> {
+    let in_repo = read_root.canonicalize().is_ok_and(|dir| {
+        dir.ancestors()
+            .any(|ancestor| ancestor.join(".git").exists())
+    });
+    let mut builder = WalkBuilder::new(read_root);
+    builder
         .follow_links(true)
-        .require_git(false)
-        .build();
+        .require_git(in_repo)
+        .parents(in_repo);
+    let filter_root = read_root.to_path_buf();
+    let filter_config = config.clone();
+    builder.filter_entry(move |entry| {
+        let relative = entry
+            .path()
+            .strip_prefix(&filter_root)
+            .unwrap_or(entry.path());
+        !filter_config.excludes(relative)
+    });
     let mut files = Vec::new();
-    for entry in walker {
+    for entry in builder.build() {
+        if reporter.broken() {
+            break;
+        }
         let entry = match entry {
             Ok(entry) => entry,
             Err(error) => {
-                reporter.problem(&format!(
-                    "{}: error: cannot walk the directory: {error}",
-                    read_root.display()
-                ));
+                if let Some(path) = error_path(&error) {
+                    let relative = path.strip_prefix(read_root).unwrap_or(path);
+                    if config.excludes(relative) {
+                        continue;
+                    }
+                    let is_source = path
+                        .extension()
+                        .and_then(|extension| extension.to_str())
+                        .is_some_and(|extension| {
+                            ADAPTERS
+                                .iter()
+                                .any(|adapter| adapter.extensions().contains(&extension))
+                        });
+                    // A directory that cannot be read may hide violations;
+                    // a file that no adapter handles is not ours to check.
+                    if !path.is_dir() && !is_source {
+                        continue;
+                    }
+                    reporter.problem(&format!(
+                        "{}: error: cannot walk: {error}",
+                        root.join(relative).display()
+                    ));
+                } else {
+                    reporter.problem(&format!(
+                        "{}: error: cannot walk: {error}",
+                        read_root.display()
+                    ));
+                }
                 continue;
             }
         };
@@ -223,6 +298,19 @@ fn collect_files(reporter: &mut Reporter, read_root: &Path) -> Vec<PathBuf> {
     }
     files.sort();
     files
+}
+
+/// Returns the path an `ignore::Error` is about, if it has one.
+fn error_path(error: &ignore::Error) -> Option<&Path> {
+    match error {
+        ignore::Error::WithPath { path, .. } => Some(path),
+        ignore::Error::Loop { child, .. } => Some(child),
+        ignore::Error::Partial(errors) => errors.iter().find_map(error_path),
+        ignore::Error::WithLineNumber { err, .. } | ignore::Error::WithDepth { err, .. } => {
+            error_path(err)
+        }
+        _ => None,
+    }
 }
 
 /// Reads `path` and parses it, reporting every problem through `reporter`.
