@@ -57,11 +57,11 @@ pub fn extract(source: &str) -> Result<SourceFile, Vec<Diagnostic>> {
     let translated = Translated::new(source).map_err(|malformed| {
         malformed
             .iter()
-            .map(|escape| Diagnostic {
-                location: lines.location(escape.offset),
-                message:
-                    "invalid Unicode escape: `\\u` must be followed by four hexadecimal digits"
-                        .to_owned(),
+            .map(|escape| {
+                Diagnostic::new(
+                    lines.location(escape.offset),
+                    "invalid Unicode escape: `\\u` must be followed by four hexadecimal digits",
+                )
             })
             .collect::<Vec<_>>()
     })?;
@@ -141,6 +141,8 @@ fn syntax_errors(root: Node, source: &Source) -> Vec<Diagnostic> {
         errors.push(Diagnostic {
             location: source.location(node.start_byte()),
             message,
+            span: Some(source.span(node.start_byte(), node.end_byte())),
+            rule_id: None,
         });
     }
     if errors.is_empty() {
@@ -148,6 +150,8 @@ fn syntax_errors(root: Node, source: &Source) -> Vec<Diagnostic> {
         errors.push(Diagnostic {
             location: source.location(root.start_byte()),
             message: "syntax error".to_owned(),
+            span: Some(source.span(root.start_byte(), root.end_byte())),
+            rule_id: None,
         });
     }
     errors.sort_by_key(|error| error.location);

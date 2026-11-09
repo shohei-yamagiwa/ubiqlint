@@ -17,9 +17,13 @@ ubiqlint-core = { path = "crates/ubiqlint-core" }
 ubiqlint-java = { path = "crates/ubiqlint-java" }
 ubiqlint-project = { path = "crates/ubiqlint-project" }
 ubiqlint-mcp = { path = "crates/ubiqlint-mcp" }
+ubiqlint-lsp = { path = "crates/ubiqlint-lsp" }
 clap = { version = "4", features = ["derive"] }
 globset = "0.4"
 ignore = "0.4"
+lsp-server = "0.7"
+lsp-types = "0.97"
+percent-encoding = "2"
 rmcp = { version = "3.9", features = ["transport-io"] }
 saphyr = "0.3.3"
 schemars = "1"
@@ -27,5 +31,6 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tree-sitter = "0.26"
 tokio = { version = "1", features = ["rt", "macros", "io-std"] }
+url = "2"
 # tree-sitter-java 0.23.5 with modifiers allowed in patterns; see its README.
 tree-sitter-java = { path = "vendor/tree-sitter-java" }

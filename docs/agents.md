@@ -10,6 +10,8 @@
 
 違反を消すためだけに辞書を変えていないかは、レビューするエージェントが確かめます（5 節）。
 
+編集のたびに違反を自動で受け取るには、診断専用の `ubiqlint lsp` を使います。[LSP の設定手順](lsp.md)に Claude Code のプラグインと Neovim の設定例があります。Claude Code では jdtls と同じ `.java` に通知を配信できない制限があるため、Java の LSP を選んで使うか、jdtls と ubiqlint の MCP・hooks を組み合わせます。
+
 ## 1. MCP サーバを登録する
 
 `ubiqlint mcp` は、標準入出力で MCP を話すサーバです。1 つのサーバが 1 つの設定ファイル（`ubiqlint.yaml`）のプロジェクトを受け持ちます。
@@ -84,7 +86,7 @@ src/main/java/com/example/order/domain/Order.java:7:17: error: `updateOrder` doe
 
 ## 4. hooks から検査する（任意）
 
-ubiqlint は、特定のエージェントの hooks に対応するコードを持ちません（[実装計画](plan.md)の 6.4 節）。編集のたびに違反をエージェントに返したい場合は、ファイルを指定する `ubiqlint check` を hooks から呼びます。
+ubiqlint は、特定のエージェントの hooks に対応するコードを持ちません（[実装計画](plan.md)の 6.4 節）。自動診断には LSP を使えますが、LSP を起動できない環境や jdtls を優先する Claude Code では、ファイルを指定する `ubiqlint check` を hooks から呼べます。
 
 Claude Code では、ファイルを編集した後に呼ばれる `PostToolUse` に登録します。終了コード 2 で終わると、stderr の内容が Claude に渡ります。
 

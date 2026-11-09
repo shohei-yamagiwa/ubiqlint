@@ -118,6 +118,8 @@ impl<'a> Checker<'a> {
                 diagnostics.push(Diagnostic {
                     location: import.span.start,
                     message,
+                    span: Some(import.span),
+                    rule_id: Some(rule.id.clone()),
                 });
             }
         }
@@ -206,6 +208,8 @@ impl<'a> Checker<'a> {
         Some(Diagnostic {
             location: identifier.name.span.start,
             message,
+            span: Some(identifier.name.span),
+            rule_id: Some(rule.id.clone()),
         })
     }
 

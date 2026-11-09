@@ -15,7 +15,9 @@ path = "src/main.rs"
 clap.workspace = true
 ubiqlint-core.workspace = true
 ubiqlint-mcp.workspace = true
+ubiqlint-lsp.workspace = true
 ubiqlint-project.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true
+url.workspace = true

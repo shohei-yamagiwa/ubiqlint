@@ -58,6 +58,13 @@ enum Command {
         #[arg(long, default_value = CONFIG_FILE_NAME)]
         config: PathBuf,
     },
+    /// Publish diagnostics to editors and agents over the Language Server Protocol
+    Lsp {
+        /// The configuration file. Defaults to ubiqlint.yaml in the client's
+        /// workspace root (or the working directory if no root is supplied)
+        #[arg(long)]
+        config: Option<PathBuf>,
+    },
 }
 
 /// The dictionary an editing command changes.
@@ -234,6 +241,15 @@ fn parse_text(text: &str) -> Result<String, String> {
 
 fn main() -> ExitCode {
     let command = Cli::parse().command;
+    if let Command::Lsp { config } = &command {
+        return match ubiqlint_lsp::serve_stdio(config.as_deref()) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("error: the LSP server stopped: {error}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     if let Command::Mcp { config } = &command {
         // Served before the reporter exists: it locks standard output,
         // which carries the protocol. Problems go to stderr instead.
@@ -248,6 +264,7 @@ fn main() -> ExitCode {
     let mut reporter = Reporter::new();
     match command {
         Command::Mcp { .. } => unreachable!("the MCP server was served above"),
+        Command::Lsp { .. } => unreachable!("the LSP server was served above"),
         Command::Validate { files } => validate(&mut reporter, &files),
         Command::Check {
             config,
