@@ -104,3 +104,101 @@ fn validate_requires_a_file() {
 
     assert_eq!(output.status.code(), Some(2));
 }
+
+#[test]
+fn check_accepts_a_project_without_violations() {
+    let output = ubiqlint(&["check", "--config", "tests/fixtures/check/ok/ubiqlint.yaml"]);
+
+    assert!(output.status.success());
+    assert_eq!(stdout(&output), "");
+}
+
+#[test]
+fn check_reports_every_violation_with_its_location() {
+    let output = ubiqlint(&[
+        "check",
+        "--config",
+        "tests/fixtures/check/bad/ubiqlint.yaml",
+    ]);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        stdout(&output),
+        "\
+tests/fixtures/check/bad/src/main/java/com/example/order/domain/Broken.java:3:22: error: syntax error: missing `}`
+tests/fixtures/check/bad/src/main/java/com/example/order/domain/Order.java:7:17: error: `updateOrder` does not match pattern `{verb}{noun}` of rule `domain-method`: `update` is not a defined behavior of `Order` (defined behaviors: `place`, `cancel`)
+tests/fixtures/check/bad/src/main/java/com/example/order/domain/PurchaseService.java:3:14: error: `PurchaseService` does not match any pattern of rule `domain-type`: expected one of `{noun}`, `{noun}{role}`, `{noun}{verb:pp}`
+"
+    );
+}
+
+#[test]
+fn check_uses_another_dictionary_when_asked() {
+    let output = ubiqlint(&[
+        "check",
+        "--config",
+        "tests/fixtures/check/bad/ubiqlint.yaml",
+        "--dictionary",
+        "tests/fixtures/check/bad/extra-terms.yaml",
+    ]);
+
+    // `updateOrder` is allowed by the extra dictionary; the rest remains.
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        stdout(&output),
+        "\
+tests/fixtures/check/bad/src/main/java/com/example/order/domain/Broken.java:3:22: error: syntax error: missing `}`
+tests/fixtures/check/bad/src/main/java/com/example/order/domain/PurchaseService.java:3:14: error: `PurchaseService` does not match any pattern of rule `domain-type`: expected one of `{noun}`, `{noun}{role}`, `{noun}{verb:pp}`
+"
+    );
+}
+
+#[test]
+fn check_reports_an_unreadable_config() {
+    let output = ubiqlint(&[
+        "check",
+        "--config",
+        "tests/fixtures/check/missing/ubiqlint.yaml",
+    ]);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        stdout(&output).starts_with(
+            "tests/fixtures/check/missing/ubiqlint.yaml: error: cannot read the file: "
+        ),
+        "unexpected output: {}",
+        stdout(&output)
+    );
+}
+
+#[test]
+fn check_reports_an_invalid_config() {
+    let output = ubiqlint(&["check", "--config", "tests/fixtures/invalid/ubiqlint.yaml"]);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        stdout(&output),
+        "\
+tests/fixtures/invalid/ubiqlint.yaml:4:13: error: unknown target `class`, \
+expected one of `type`, `method`, `field`, `parameter`, `variable`
+tests/fixtures/invalid/ubiqlint.yaml:6:9: error: unknown placeholder `{role}`: \
+expected `{noun}`, `{verb}`, `{any}` or a vocabulary defined in `vocabularies`
+"
+    );
+}
+
+#[test]
+fn check_accepts_the_sample_project() {
+    let output = ubiqlint(&[
+        "check",
+        "--config",
+        "../../examples/order-service/ubiqlint.yaml",
+    ]);
+
+    assert!(
+        output.status.success(),
+        "unexpected output: {}",
+        stdout(&output)
+    );
+    assert_eq!(stdout(&output), "");
+}

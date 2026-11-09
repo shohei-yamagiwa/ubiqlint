@@ -9,6 +9,7 @@ use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use crate::diagnostic::Diagnostic;
 use crate::location::Location;
 use crate::pattern::{Pattern, RESERVED_NAMES};
+use crate::symbol::SymbolKind;
 use crate::words::Words;
 use crate::yaml::{self, Diagnostics, Fields, Node};
 
@@ -73,6 +74,19 @@ impl Target {
             .find(|(_, target)| *target == self)
             .map(|(name, _)| *name)
             .expect("every target has a name")
+    }
+
+    /// Tells whether a symbol of `kind` is checked by a rule with this
+    /// target. Constructors are never checked: their names are given by
+    /// their types.
+    pub fn matches(self, kind: SymbolKind) -> bool {
+        kind == match self {
+            Self::Type => SymbolKind::Type,
+            Self::Method => SymbolKind::Method,
+            Self::Field => SymbolKind::Field,
+            Self::Parameter => SymbolKind::Parameter,
+            Self::Variable => SymbolKind::Variable,
+        }
     }
 }
 
@@ -561,6 +575,21 @@ rules:
     fn target_names_round_trip() {
         for (name, target) in TARGETS {
             assert_eq!(target.name(), name);
+        }
+    }
+
+    #[test]
+    fn targets_match_their_symbol_kinds_only() {
+        use crate::symbol::SymbolKind::*;
+        assert!(Target::Type.matches(Type));
+        assert!(Target::Method.matches(Method));
+        assert!(Target::Field.matches(Field));
+        assert!(Target::Parameter.matches(Parameter));
+        assert!(Target::Variable.matches(Variable));
+        assert!(!Target::Method.matches(Type));
+        // Constructors are never checked.
+        for (_, target) in TARGETS {
+            assert!(!target.matches(crate::symbol::SymbolKind::Constructor));
         }
     }
 }
