@@ -11,6 +11,7 @@
 //!   lowercase letter follows it: `HTTPOrder` → `http order`.
 //! - The exception is a lone `s` ending the run's word, which is read as
 //!   the plural of an acronym: `URLs` → `urls`, `IDsByOrder` → `ids by order`.
+//!   Digits after the `s` do not change this: `URLs2Csv` → `urls2 csv`.
 //! - Digits belong to the word they follow and never start a word by
 //!   themselves, except after a separator or at the start:
 //!   `base64Encode` → `base64 encode`, `B2BOrder` → `b2b order`,
@@ -85,10 +86,16 @@ fn starts_word(last_letter: Option<Class>, rest: &[(usize, char)]) -> bool {
         // The last capital of an acronym: `HTTPOrder`, `B2BOrder`, but not
         // a plural acronym such as `URLs`.
         Some(Class::Upper) => {
-            let next = rest.first().map(|&(_, c)| c);
-            let after_next = rest.get(1).map(|&(_, c)| class(c));
-            match next {
-                Some('s') => after_next == Some(Class::Lower),
+            match rest.first().map(|&(_, c)| c) {
+                // A lone `s` ends the word unless more lowercase letters
+                // follow it, possibly after digits: `URLs2Csv`, but `ABs2c`.
+                Some('s') => {
+                    let following = rest[1..]
+                        .iter()
+                        .map(|&(_, c)| class(c))
+                        .find(|&class| class != Class::Digit);
+                    following == Some(Class::Lower)
+                }
                 Some(c) => class(c) == Class::Lower,
                 None => false,
             }
@@ -158,6 +165,18 @@ mod tests {
             ("IDsByOrder", &["ids", "by", "order"]),
             ("HTTPs", &["https"]),
             ("UUIDs2", &["uuids2"]),
+            ("URLs2Csv", &["urls2", "csv"]),
+        ]);
+    }
+
+    #[test]
+    fn splits_an_s_followed_by_more_lowercase_letters() {
+        // The `s` is not a plural suffix when lowercase letters follow it,
+        // with or without digits in between.
+        check(&[
+            ("ABsc", &["a", "bsc"]),
+            ("ABs2c", &["a", "bs2c"]),
+            ("HTTPSession", &["http", "session"]),
         ]);
     }
 

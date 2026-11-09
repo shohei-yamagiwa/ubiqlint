@@ -62,7 +62,7 @@ ubiqlint は、ユビキタス言語を「人間が守るよう努める約束�
 | 英数字以外の文字（`_`、`$` など）は区切りになる | `ORDER_ID` → `order id` |
 | 小文字の直後の大文字から新しい単語が始まる | `placeOrder` → `place order` |
 | 大文字が続くとき、小文字の直前にある最後の大文字から新しい単語が始まる | `HTTPOrderClient` → `http order client` |
-| ただし、大文字の連続の直後に単語末尾の `s` が 1 文字だけ続く場合は、略語の複数形として 1 語にまとめる | `URLs` → `urls`、`IDsByOrder` → `ids by order` |
+| ただし、大文字の連続の直後に単語末尾の `s` が 1 文字だけ続く場合は、略語の複数形として 1 語にまとめる。`s` のあとに数字が続いても同じ | `URLs` → `urls`、`IDsByOrder` → `ids by order`、`URLs2Csv` → `urls2 csv` |
 | 数字は直前の単語にくっつき、それ自体では単語を区切らない | `base64Encode` → `base64 encode`、`B2BOrder` → `b2b order` |
 | 区切りの直後や先頭の数字は、続く文字と同じ単語になる | `3DSecure` → `3d secure`、`2FA` → `2fa` |
 | 日本語のように大文字・小文字のない文字は、小文字と同じに扱う | `注文Service` → `注文 service` |
