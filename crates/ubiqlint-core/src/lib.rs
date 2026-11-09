@@ -8,6 +8,7 @@
 pub mod config;
 pub mod diagnostic;
 pub mod dictionary;
+pub mod identifier;
 pub mod pattern;
 pub mod words;
 
