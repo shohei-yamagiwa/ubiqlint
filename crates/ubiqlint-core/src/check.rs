@@ -6,7 +6,7 @@
 //! `{noun}` element matched in the same identifier or, if there is none, to the term
 //! of the innermost enclosing type, and may then only use a form of one of
 //! that term's defined behaviors. The policy for identifiers with multiple
-//! nouns is provisional; see section 8 of `docs/plan.md`.
+//! nouns is provisional.
 //!
 //! Imports from external namespaces may not introduce a dictionary term's
 //! canonical name or use a wildcard. Internal namespace prefixes and the
@@ -1014,7 +1014,7 @@ rules:
     #[test]
     fn records_current_binding_of_verbs_to_the_first_of_multiple_nouns() {
         // This records the current implementation, not a settled specification.
-        // The multiple-noun policy remains open in docs/plan.md section 8;
+        // The multiple-noun policy remains open;
         // update this regression test when that policy is decided.
         let (dictionary, _) = setup();
         let config = Config::from_yaml_str(
