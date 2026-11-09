@@ -61,6 +61,19 @@ expected `{noun}`, `{verb}`, `{any}` or a vocabulary defined in `vocabularies`
 }
 
 #[test]
+fn validate_keeps_each_problem_on_one_line() {
+    let output = ubiqlint(&["validate", "tests/fixtures/multiline/terms.yaml"]);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        stdout(&output),
+        "tests/fixtures/multiline/terms.yaml:4:24: error: invalid `singular`: \
+         `order\\nitem` is not a valid word sequence: use lowercase letters and digits, \
+         with a single space between words (e.g. `line item`)\n"
+    );
+}
+
+#[test]
 fn validate_rejects_files_of_unknown_kind() {
     let output = ubiqlint(&["validate", "Cargo.toml"]);
 

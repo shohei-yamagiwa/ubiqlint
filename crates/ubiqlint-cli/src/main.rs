@@ -37,7 +37,7 @@ fn validate(files: &[PathBuf]) -> ExitCode {
         if let Err(problems) = validate_file(path) {
             valid = false;
             for problem in problems {
-                println!("{problem}");
+                println!("{}", single_line(&problem));
             }
         }
     }
@@ -46,6 +46,20 @@ fn validate(files: &[PathBuf]) -> ExitCode {
     } else {
         ExitCode::FAILURE
     }
+}
+
+/// Escapes control characters other than tabs, so that each problem stays on
+/// one line even when it quotes a value containing a line break.
+fn single_line(text: &str) -> String {
+    let mut line = String::with_capacity(text.len());
+    for c in text.chars() {
+        if c.is_control() && c != '\t' {
+            line.extend(c.escape_default());
+        } else {
+            line.push(c);
+        }
+    }
+    line
 }
 
 fn validate_file(path: &Path) -> Result<(), Vec<String>> {
