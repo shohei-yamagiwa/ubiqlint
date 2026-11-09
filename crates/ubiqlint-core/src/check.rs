@@ -12,7 +12,7 @@ use std::path::Path;
 
 use crate::config::{Config, Rule};
 use crate::diagnostic::Diagnostic;
-use crate::dictionary::{DICTIONARY_FILE_NAME, Dictionary};
+use crate::dictionary::Dictionary;
 use crate::identifier;
 use crate::matching::{MatchMode, Matcher};
 use crate::pattern::{Element, NounForm, Pattern, VerbForm};
@@ -21,6 +21,7 @@ use crate::symbol::{Name, SymbolKind, Symbols};
 /// Checks symbols against rules, using one dictionary and one configuration.
 pub struct Checker<'a> {
     config: &'a Config,
+    dictionary_path: &'a Path,
     matcher: Matcher<'a>,
 }
 
@@ -42,10 +43,12 @@ fn verb_placeholder(form: VerbForm) -> String {
 }
 
 impl<'a> Checker<'a> {
-    /// Creates a checker for `dictionary` and `config`.
-    pub fn new(dictionary: &'a Dictionary, config: &'a Config) -> Self {
+    /// Creates a checker for `dictionary` and `config`. `dictionary_path`
+    /// identifies the definition file in diagnostics and editing hints.
+    pub fn new(dictionary: &'a Dictionary, dictionary_path: &'a Path, config: &'a Config) -> Self {
         Self {
             config,
+            dictionary_path,
             matcher: Matcher::new(dictionary, config),
         }
     }
@@ -190,7 +193,10 @@ impl<'a> Checker<'a> {
             (None, _) if bindings.verbs().next().is_some() => {
                 let reason = match identifier.enclosing_type {
                     Some(enclosing_type) => {
-                        format!("the enclosing type `{enclosing_type}` is not in the dictionary")
+                        format!(
+                            "the enclosing type `{enclosing_type}` is not in the dictionary `{}`",
+                            self.dictionary_path.display()
+                        )
                     }
                     None => "the identifier contains no `{noun}` and there is no enclosing type"
                         .to_owned(),
@@ -239,8 +245,9 @@ impl<'a> Checker<'a> {
         if uses_dictionary {
             format!(
                 "{head}. If `{}` is a new term or behavior of the ubiquitous language, define \
-                 it in `{DICTIONARY_FILE_NAME}` first",
-                name.text
+                 it in `{}` first",
+                name.text,
+                self.dictionary_path.display()
             )
         } else {
             head
@@ -251,6 +258,7 @@ impl<'a> Checker<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dictionary::DICTIONARY_FILE_NAME;
     use crate::location::{Location, Span};
 
     const DICTIONARY: &str = "\
@@ -346,7 +354,7 @@ rules:
     #[test]
     fn accepts_identifiers_that_match_a_pattern() {
         let (dictionary, config) = setup();
-        let checker = Checker::new(&dictionary, &config);
+        let checker = Checker::new(&dictionary, Path::new(DICTIONARY_FILE_NAME), &config);
         let mut symbols = order_class(&[
             (SymbolKind::Method, "place", 4),
             (SymbolKind::Method, "cancel", 7),
@@ -372,7 +380,7 @@ rules:
     #[test]
     fn accepts_getters_and_setters_in_dto_files() {
         let (dictionary, config) = setup();
-        let checker = Checker::new(&dictionary, &config);
+        let checker = Checker::new(&dictionary, Path::new(DICTIONARY_FILE_NAME), &config);
         let mut symbols = Symbols::new();
         let dto = symbols.push(SymbolKind::Type, name("OrderDto", 1, 13), span(1, 13), None);
         for (text, line) in [("getId", 4), ("setId", 8)] {
@@ -390,7 +398,7 @@ rules:
     #[test]
     fn reports_a_verb_that_is_not_a_defined_behavior() {
         let (dictionary, config) = setup();
-        let checker = Checker::new(&dictionary, &config);
+        let checker = Checker::new(&dictionary, Path::new(DICTIONARY_FILE_NAME), &config);
         let symbols = order_class(&[(SymbolKind::Method, "updateOrder", 7)]);
 
         let diagnostics = checker.check(&symbols, Path::new(DOMAIN));
@@ -412,7 +420,7 @@ rules:
     #[test]
     fn describes_a_bare_verb_against_the_bare_verb_pattern() {
         let (dictionary, config) = setup();
-        let checker = Checker::new(&dictionary, &config);
+        let checker = Checker::new(&dictionary, Path::new(DICTIONARY_FILE_NAME), &config);
         let symbols = order_class(&[(SymbolKind::Method, "update", 7)]);
 
         let diagnostics = checker.check(&symbols, Path::new(DOMAIN));
@@ -428,7 +436,7 @@ rules:
     #[test]
     fn binds_a_verb_to_the_noun_in_the_identifier_first() {
         let (dictionary, config) = setup();
-        let checker = Checker::new(&dictionary, &config);
+        let checker = Checker::new(&dictionary, Path::new(DICTIONARY_FILE_NAME), &config);
         // `place` is a behavior of the enclosing `Order`, but the `{noun}` of
         // the identifier is `LineItem`, which defines no behaviors.
         let symbols = order_class(&[(SymbolKind::Method, "placeLineItem", 7)]);
@@ -446,7 +454,7 @@ rules:
     #[test]
     fn binds_a_verb_to_the_enclosing_type_when_the_identifier_has_no_noun() {
         let (dictionary, config) = setup();
-        let checker = Checker::new(&dictionary, &config);
+        let checker = Checker::new(&dictionary, Path::new(DICTIONARY_FILE_NAME), &config);
         let mut symbols = Symbols::new();
         let helper = symbols.push(SymbolKind::Type, name("Helper", 1, 13), span(1, 13), None);
         symbols.push(
@@ -465,7 +473,7 @@ rules:
                  If `Helper` is a new term or behavior of the ubiquitous language, \
                  define it in `terms.yaml` first",
                 "`run` does not match pattern `{verb}` of rule `domain-method`: `{verb}` is \
-                 not bound to a term: the enclosing type `Helper` is not in the dictionary",
+                 not bound to a term: the enclosing type `Helper` is not in the dictionary `terms.yaml`",
             ]
         );
     }
@@ -473,7 +481,7 @@ rules:
     #[test]
     fn reports_an_unknown_noun_with_the_pattern_list() {
         let (dictionary, config) = setup();
-        let checker = Checker::new(&dictionary, &config);
+        let checker = Checker::new(&dictionary, Path::new(DICTIONARY_FILE_NAME), &config);
         let mut symbols = Symbols::new();
         symbols.push(
             SymbolKind::Type,
@@ -503,7 +511,7 @@ rules:
     #[test]
     fn reports_a_pp_that_is_not_a_defined_behavior() {
         let (dictionary, config) = setup();
-        let checker = Checker::new(&dictionary, &config);
+        let checker = Checker::new(&dictionary, Path::new(DICTIONARY_FILE_NAME), &config);
         let mut symbols = Symbols::new();
         symbols.push(
             SymbolKind::Type,
@@ -525,7 +533,7 @@ rules:
     #[test]
     fn any_needs_at_least_one_word() {
         let (dictionary, config) = setup();
-        let checker = Checker::new(&dictionary, &config);
+        let checker = Checker::new(&dictionary, Path::new(DICTIONARY_FILE_NAME), &config);
         let mut symbols = Symbols::new();
         let dto = symbols.push(SymbolKind::Type, name("OrderDto", 1, 13), span(1, 13), None);
         symbols.push(
@@ -548,7 +556,7 @@ rules:
     #[test]
     fn matches_multi_word_nouns_in_singular_and_plural() {
         let (dictionary, config) = setup();
-        let checker = Checker::new(&dictionary, &config);
+        let checker = Checker::new(&dictionary, Path::new(DICTIONARY_FILE_NAME), &config);
         let mut symbols = Symbols::new();
         symbols.push(SymbolKind::Type, name("LineItem", 3, 13), span(3, 13), None);
         let order = symbols.push(SymbolKind::Type, name("Order", 10, 13), span(10, 13), None);
@@ -586,7 +594,7 @@ rules:
     #[test]
     fn skips_symbols_and_files_no_rule_applies_to() {
         let (dictionary, config) = setup();
-        let checker = Checker::new(&dictionary, &config);
+        let checker = Checker::new(&dictionary, Path::new(DICTIONARY_FILE_NAME), &config);
         let mut symbols = order_class(&[(SymbolKind::Method, "updateOrder", 7)]);
         // Constructors are never checked, and neither are unnamed types.
         let order = symbols.iter().next().unwrap().id;
@@ -612,7 +620,7 @@ rules:
     #[test]
     fn distinguishes_a_defined_behavior_in_a_different_form() {
         let (dictionary, config) = setup();
-        let checker = Checker::new(&dictionary, &config);
+        let checker = Checker::new(&dictionary, Path::new(DICTIONARY_FILE_NAME), &config);
         // `OrderPlace` fails `{noun}{verb:pp}`, but `place` is defined: the
         // message must say the pp form `placed` is what the pattern expects.
         let mut symbols = Symbols::new();
@@ -648,7 +656,7 @@ rules:
     #[test]
     fn does_not_blame_the_whole_identifier_on_a_lone_verb_pattern() {
         let (dictionary, config) = setup();
-        let checker = Checker::new(&dictionary, &config);
+        let checker = Checker::new(&dictionary, Path::new(DICTIONARY_FILE_NAME), &config);
         // Neither `placeOrders` nor `toString` is an attempt at a behavior;
         // the message must not claim `place orders` or `to string` is one.
         let symbols = order_class(&[
@@ -675,7 +683,7 @@ rules:
     #[test]
     fn reports_an_identifier_that_splits_into_no_words() {
         let (dictionary, config) = setup();
-        let checker = Checker::new(&dictionary, &config);
+        let checker = Checker::new(&dictionary, Path::new(DICTIONARY_FILE_NAME), &config);
         // `__` splits into no words, so no pattern can match it.
         let symbols = order_class(&[(SymbolKind::Field, "__", 4)]);
 
@@ -697,7 +705,7 @@ rules:
     #[test]
     fn sorts_diagnostics_by_location() {
         let (dictionary, config) = setup();
-        let checker = Checker::new(&dictionary, &config);
+        let checker = Checker::new(&dictionary, Path::new(DICTIONARY_FILE_NAME), &config);
         // Registered out of source order: line 10 before line 4.
         let symbols = order_class(&[
             (SymbolKind::Method, "updateOrder", 10),
@@ -712,7 +720,7 @@ rules:
     #[test]
     fn skips_anonymous_classes_when_binding_the_enclosing_type() {
         let (dictionary, config) = setup();
-        let checker = Checker::new(&dictionary, &config);
+        let checker = Checker::new(&dictionary, Path::new(DICTIONARY_FILE_NAME), &config);
         let mut symbols = Symbols::new();
         let order = symbols.push(SymbolKind::Type, name("Order", 1, 13), span(1, 13), None);
         let anonymous = symbols.push(SymbolKind::Type, None, span(3, 20), Some(order));
@@ -743,7 +751,7 @@ rules:
             "rules:\n  - id: event\n    include: [\"**/domain/**\"]\n    target: type\n    patterns: [\"{noun}{verb}{verb:pp}\"]\n",
         )
         .unwrap();
-        let checker = Checker::new(&dictionary, &config);
+        let checker = Checker::new(&dictionary, Path::new(DICTIONARY_FILE_NAME), &config);
         let mut symbols = Symbols::new();
         symbols.push(SymbolKind::Type, name("Order", 1, 13), span(1, 13), None);
 
@@ -792,7 +800,7 @@ rules:
     fn relaxed_matching_does_not_swallow_unrelated_words() {
         let dictionary = Dictionary::from_yaml_str(CHECKOUT_DICTIONARY).unwrap();
         let config = Config::from_yaml_str(VERB_CONFIG).unwrap();
-        let checker = Checker::new(&dictionary, &config);
+        let checker = Checker::new(&dictionary, Path::new(DICTIONARY_FILE_NAME), &config);
         let mut symbols = Symbols::new();
         symbols.push(
             SymbolKind::Type,
@@ -817,7 +825,7 @@ rules:
     fn multi_word_behaviors_get_form_mismatch_messages() {
         let dictionary = Dictionary::from_yaml_str(CHECKOUT_DICTIONARY).unwrap();
         let config = Config::from_yaml_str(VERB_CONFIG).unwrap();
-        let checker = Checker::new(&dictionary, &config);
+        let checker = Checker::new(&dictionary, Path::new(DICTIONARY_FILE_NAME), &config);
         let symbols = order_class(&[
             (SymbolKind::Method, "checksOut", 4),
             (SymbolKind::Method, "checkedOutOrder", 7),
@@ -840,7 +848,7 @@ rules:
     #[test]
     fn does_not_skip_a_named_type_that_is_not_a_term() {
         let (dictionary, config) = setup();
-        let checker = Checker::new(&dictionary, &config);
+        let checker = Checker::new(&dictionary, Path::new(DICTIONARY_FILE_NAME), &config);
         let mut symbols = Symbols::new();
         let order = symbols.push(SymbolKind::Type, name("Order", 1, 13), span(1, 13), None);
         let builder = symbols.push(
@@ -865,7 +873,7 @@ rules:
                  If `Builder` is a new term or behavior of the ubiquitous language, \
                  define it in `terms.yaml` first",
                 "`place` does not match pattern `{verb}` of rule `domain-method`: `{verb}` is \
-                 not bound to a term: the enclosing type `Builder` is not in the dictionary",
+                 not bound to a term: the enclosing type `Builder` is not in the dictionary `terms.yaml`",
             ]
         );
     }
@@ -892,7 +900,7 @@ rules:
 "#,
         )
         .unwrap();
-        let checker = Checker::new(&dictionary, &config);
+        let checker = Checker::new(&dictionary, Path::new(DICTIONARY_FILE_NAME), &config);
         // `Order` matches first, but cannot `ship`. Its noun and verb
         // bindings must be undone before trying the longer `OrderLine`.
         let symbols = order_class(&[(SymbolKind::Method, "orderLineExtraShip", 4)]);
@@ -918,7 +926,7 @@ rules:
 "#
             ))
             .unwrap();
-            let checker = Checker::new(&dictionary, &config);
+            let checker = Checker::new(&dictionary, Path::new(DICTIONARY_FILE_NAME), &config);
             let symbols = order_class(&[(SymbolKind::Method, identifier, 4)]);
             assert_eq!(
                 checker.check(&symbols, Path::new(DOMAIN)),
@@ -944,7 +952,7 @@ rules:
 "#,
         )
         .unwrap();
-        let checker = Checker::new(&dictionary, &config);
+        let checker = Checker::new(&dictionary, Path::new(DICTIONARY_FILE_NAME), &config);
         let symbols = order_class(&[
             (SymbolKind::Method, "orderPlaceLineItemCancel", 4),
             (SymbolKind::Method, "lineItemPlaceOrderCancel", 7),
@@ -973,7 +981,7 @@ rules:
 "#
             ))
             .unwrap();
-            let checker = Checker::new(&dictionary, &config);
+            let checker = Checker::new(&dictionary, Path::new(DICTIONARY_FILE_NAME), &config);
             let symbols = order_class(&[(SymbolKind::Method, "updateOrder", 4)]);
             let diagnostics = checker.check(&symbols, Path::new(DOMAIN));
             assert_eq!(diagnostics.len(), 1);

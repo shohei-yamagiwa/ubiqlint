@@ -100,6 +100,16 @@ impl DictionaryResolver {
         self.resolve(Path::new(DICTIONARY_FILE_NAME))
     }
 
+    /// Borrows a successfully loaded dictionary by its resolved path,
+    /// without any filesystem access. Resolve the source paths first, then
+    /// use shared borrows to keep one checker per dictionary for the run.
+    pub fn loaded_dictionary(&self, path: &Path) -> Option<&Dictionary> {
+        match self.dictionaries.get(path) {
+            Some(Ok(Some(dictionary))) => Some(dictionary),
+            _ => None,
+        }
+    }
+
     /// Resolves `source`, a file path relative to the configuration root.
     /// The source file need not exist (for example, an editor's new buffer).
     /// Absolute paths and paths escaping the root are rejected.
@@ -368,6 +378,36 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(resolved.dictionary.context, "repaired");
+    }
+
+    #[test]
+    fn loaded_dictionaries_can_be_borrowed_together_after_resolution() {
+        let project = Project::new();
+        project.write("terms.yaml", &dictionary("root", "Order"));
+        project.write("src/terms.yaml", &dictionary("nested", "Invoice"));
+        let mut resolver = DictionaryResolver::new(&project.0);
+        let root_path = resolver
+            .resolve(Path::new("Order.java"))
+            .unwrap()
+            .unwrap()
+            .path
+            .to_owned();
+        let nested_path = resolver
+            .resolve(Path::new("src/Invoice.java"))
+            .unwrap()
+            .unwrap()
+            .path
+            .to_owned();
+
+        let root = resolver.loaded_dictionary(&root_path).unwrap();
+        let nested = resolver.loaded_dictionary(&nested_path).unwrap();
+        assert_eq!(root.context, "root");
+        assert_eq!(nested.context, "nested");
+        assert!(
+            resolver
+                .loaded_dictionary(&project.0.join("missing/terms.yaml"))
+                .is_none()
+        );
     }
 
     #[cfg(unix)]

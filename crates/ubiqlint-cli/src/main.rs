@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -63,6 +63,7 @@ struct Reporter {
     out: io::BufWriter<io::StdoutLock<'static>>,
     failed: bool,
     broken: bool,
+    reported: HashSet<PathBuf>,
 }
 
 impl Reporter {
@@ -71,6 +72,7 @@ impl Reporter {
             out: io::BufWriter::new(io::stdout().lock()),
             failed: false,
             broken: false,
+            reported: HashSet::new(),
         }
     }
 
@@ -108,8 +110,8 @@ impl Reporter {
     }
 
     /// Reports a dictionary failure once, even if many files use it.
-    fn resolution_error(&mut self, error: &ResolutionError, reported: &mut HashSet<PathBuf>) {
-        if !reported.insert(error.path().to_owned()) {
+    fn resolution_error(&mut self, error: &ResolutionError) {
+        if !self.reported.insert(error.path().to_owned()) {
             return;
         }
         match error {
@@ -121,6 +123,22 @@ impl Reporter {
                 error.path().display(),
                 single_line(&error.to_string())
             )),
+        }
+    }
+
+    /// A single missing dictionary can affect many files in a directory.
+    fn missing_dictionary(&mut self, directory: &Path) {
+        let directory = if directory.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            directory
+        };
+        if self.reported.insert(directory.to_owned()) {
+            self.problem(&format!(
+                "{}: error: no `{DICTIONARY_FILE_NAME}` found from this directory \
+                 up to the configuration directory; add a dictionary or use `--dictionary`",
+                directory.display()
+            ));
         }
     }
 
@@ -188,7 +206,6 @@ fn check(reporter: &mut Reporter, config_path: &Path, dictionary: Option<&Path>)
     // dictionary is optional: a project may only have nested contexts.
     let config = load(reporter, config_path, Config::from_yaml_str);
     let mut resolver = DictionaryResolver::new(root);
-    let mut reported = HashSet::new();
     let fixed_dictionary = if let Some(path) = dictionary {
         let loaded = load(reporter, path, Dictionary::from_yaml_str);
         if loaded.is_none() {
@@ -197,7 +214,7 @@ fn check(reporter: &mut Reporter, config_path: &Path, dictionary: Option<&Path>)
         loaded
     } else {
         if let Err(error) = resolver.root_dictionary() {
-            reporter.resolution_error(&error, &mut reported);
+            reporter.resolution_error(&error);
         }
         None
     };
@@ -206,19 +223,44 @@ fn check(reporter: &mut Reporter, config_path: &Path, dictionary: Option<&Path>)
     };
 
     let excludes = config.excludes();
+    let files = collect_files(reporter, read_root, root, excludes);
+    // Finish dictionary loading before borrowing any checkers. This lets
+    // every source using a dictionary share its lookup indices. Only paths
+    // covered by rules need resolution; errors are reported later, after
+    // the corresponding source has passed its read and syntax checks.
+    let mut resolutions = HashMap::new();
+    if fixed_dictionary.is_none() {
+        for relative in &files {
+            if excludes.matches(relative)
+                || adapter_for(relative).is_none()
+                || !config.rules.iter().any(|rule| rule.includes(relative))
+            {
+                continue;
+            }
+            let directory = relative
+                .parent()
+                .expect("a source path has a parent directory");
+            resolutions.entry(directory).or_insert_with(|| {
+                resolver
+                    .resolve(relative)
+                    .map(|resolved| resolved.map(|resolved| resolved.path.to_owned()))
+            });
+        }
+    }
+    let mut checkers = HashMap::new();
     let mut checked = 0;
-    for relative in collect_files(reporter, read_root, root, excludes) {
+    for relative in &files {
         if reporter.broken() {
             break;
         }
-        if excludes.matches(&relative) {
+        if excludes.matches(relative) {
             continue;
         }
-        let Some(adapter) = adapter_for(&relative) else {
+        let Some(adapter) = adapter_for(relative) else {
             continue;
         };
         checked += 1;
-        let path = root.join(&relative);
+        let path = root.join(relative);
         let Some(source) = read_file(reporter, &path) else {
             continue;
         };
@@ -231,30 +273,45 @@ fn check(reporter: &mut Reporter, config_path: &Path, dictionary: Option<&Path>)
         };
         // Files outside every rule still get syntax checks, as before, but
         // do not need a domain dictionary merely for being in the tree.
-        if !config.rules.iter().any(|rule| rule.includes(&relative)) {
+        if !config.rules.iter().any(|rule| rule.includes(relative)) {
             continue;
         }
-        let dictionary = if let Some(dictionary) = &fixed_dictionary {
-            dictionary
+        let (dictionary_path, resolved_dictionary) = if let Some(fixed) = &fixed_dictionary {
+            (
+                dictionary.expect("an explicit dictionary was loaded"),
+                fixed,
+            )
         } else {
-            match resolver.resolve(&relative) {
-                Ok(Some(resolved)) => resolved.dictionary,
+            match resolutions
+                .get(
+                    relative
+                        .parent()
+                        .expect("a source path has a parent directory"),
+                )
+                .expect("every applicable source directory was resolved")
+            {
+                Ok(Some(path)) => (
+                    path.as_path(),
+                    resolver
+                        .loaded_dictionary(path)
+                        .expect("a resolved dictionary was loaded successfully"),
+                ),
                 Ok(None) => {
-                    reporter.problem(&format!(
-                        "{}: error: no `{DICTIONARY_FILE_NAME}` found from the source directory \
-                         up to the configuration directory; add a dictionary or use `--dictionary`",
-                        path.display()
-                    ));
+                    reporter.missing_dictionary(
+                        path.parent().expect("a source file has a parent directory"),
+                    );
                     continue;
                 }
                 Err(error) => {
-                    reporter.resolution_error(&error, &mut reported);
+                    reporter.resolution_error(error);
                     continue;
                 }
             }
         };
-        let checker = Checker::new(dictionary, &config);
-        let diagnostics = checker.check(&symbols, &relative);
+        let checker = checkers
+            .entry(dictionary_path)
+            .or_insert_with(|| Checker::new(resolved_dictionary, dictionary_path, &config));
+        let diagnostics = checker.check(&symbols, relative);
         reporter.diagnostics(&path, &diagnostics);
     }
     if checked == 0 {

@@ -126,26 +126,92 @@ fn nearest_dictionary_replaces_parent_terms_and_behaviors() {
 }
 
 #[test]
-fn reports_missing_dictionaries_per_source_and_never_searches_above_the_config() {
+fn reports_missing_dictionaries_per_directory_and_never_searches_above_the_config() {
     let project = Project::new();
     project.write("terms.yaml", ORDER);
     project.write("nested/ubiqlint.yaml", CONFIG);
     project.write("nested/src/Order.java", "class Order { void place() {} }");
     project.write("nested/src/Other.java", "class Other {}");
+    project.write("nested/other/Order.java", "class Order {}");
 
     let output = project.check(&["--config", "nested/ubiqlint.yaml"]);
     assert_eq!(output.status.code(), Some(1));
     let out = stdout(&output);
     assert_eq!(out.lines().count(), 2, "{out}");
-    for name in ["Order", "Other"] {
+    for directory in ["src", "other"] {
         assert!(
             out.contains(&format!(
-                "nested/src/{name}.java: error: no `terms.yaml` found"
+                "nested/{directory}: error: no `terms.yaml` found from this directory"
             )),
             "{out}"
         );
     }
     assert!(out.contains("use `--dictionary`"));
+}
+
+#[test]
+fn a_missing_dictionary_in_the_current_directory_is_reported_as_dot() {
+    let project = Project::new();
+    project.write("Order.java", "class Order {}");
+    project.write("Other.java", "class Other {}");
+
+    let output = project.check(&[]);
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        stdout(&output),
+        ".: error: no `terms.yaml` found from this directory up to the configuration directory; add a dictionary or use `--dictionary`\n"
+    );
+}
+
+#[test]
+fn diagnostics_identify_the_nearest_or_explicit_dictionary() {
+    let project = Project::new();
+    project.write("terms.yaml", ORDER);
+    project.write("src/terms.yaml", OTHER_ORDER);
+    project.write("src/Helper.java", "class Helper { void cancel() {} }");
+
+    let output = project.check(&[]);
+    assert_eq!(output.status.code(), Some(1));
+    let out = stdout(&output);
+    assert_eq!(out.lines().count(), 2, "{out}");
+    assert!(out.contains("define it in `src/terms.yaml` first"), "{out}");
+    assert!(
+        out.contains("the enclosing type `Helper` is not in the dictionary `src/terms.yaml`"),
+        "{out}"
+    );
+
+    project.write("shared/custom.yaml", ORDER);
+    let output = project.check(&["--dictionary", "shared/custom.yaml"]);
+    assert_eq!(output.status.code(), Some(1));
+    let out = stdout(&output);
+    assert_eq!(out.lines().count(), 2, "{out}");
+    assert!(
+        out.contains("define it in `shared/custom.yaml` first"),
+        "{out}"
+    );
+    assert!(
+        out.contains("the enclosing type `Helper` is not in the dictionary `shared/custom.yaml`"),
+        "{out}"
+    );
+    assert!(!out.contains("`src/terms.yaml`"), "{out}");
+}
+
+#[test]
+fn preloaded_dictionary_errors_are_only_reported_after_source_syntax_checks() {
+    let project = Project::new();
+    project.write("broken/terms.yaml", "invalid: dictionary\n");
+    project.write("broken/Broken.java", "class Broken {");
+    project.write("valid/terms.yaml", ORDER);
+    project.write("valid/Order.java", "class Order { void place() {} }");
+
+    let output = project.check(&[]);
+    assert_eq!(output.status.code(), Some(1));
+    let out = stdout(&output);
+    assert_eq!(out.lines().count(), 1, "{out}");
+    assert!(
+        out.starts_with("broken/Broken.java:1:15: error: syntax error:"),
+        "{out}"
+    );
 }
 
 #[test]
