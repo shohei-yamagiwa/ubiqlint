@@ -833,3 +833,60 @@ fn check_reports_a_given_file_that_does_not_exist() {
     );
     assert_eq!(stdout(&output).lines().count(), 1);
 }
+
+// A dangling symlink can only be created at test time.
+#[cfg(unix)]
+#[test]
+fn check_reports_walk_errors_only_within_the_given_directories() {
+    use std::os::unix::fs::symlink;
+
+    let dir = std::env::temp_dir().join(format!("ubiqlint-check-scoped-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::write(
+        dir.join("ubiqlint.yaml"),
+        "rules:\n  - id: domain-method\n    include: [\"src/**\"]\n    target: method\n    patterns:\n      - \"{verb}\"\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("terms.yaml"),
+        "context: order\nterms:\n  - name: Order\n    forms: { singular: order, plural: orders }\n    behaviors:\n      - verb: place\n        forms: { base: place, s: places, past: placed, pp: placed, ing: placing }\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("src/Order.java"),
+        "public class Order {\n    public void place() {\n    }\n}\n",
+    )
+    .unwrap();
+    // Outside the scope `src`: the walk still meets it, walking from the
+    // configuration directory.
+    symlink("nowhere", dir.join("Gone.java")).unwrap();
+    let config = dir.join("ubiqlint.yaml");
+    let config = config.to_str().unwrap();
+    let src = dir.join("src");
+    let src = src.to_str().unwrap();
+
+    let scoped = ubiqlint(&["check", "--config", config, src]);
+    let whole = ubiqlint(&["check", "--config", config]);
+    // Inside the scope, the same kind of error is still reported.
+    symlink("nowhere", dir.join("src/Lost.java")).unwrap();
+    let broken = ubiqlint(&["check", "--config", config, src]);
+    let _ = fs::remove_dir_all(&dir);
+
+    assert!(
+        scoped.status.success(),
+        "unexpected output: {}",
+        stdout(&scoped)
+    );
+    assert_eq!(stdout(&scoped), "");
+    assert_eq!(whole.status.code(), Some(1));
+    assert!(
+        stdout(&whole).contains("Gone.java: error: cannot walk: "),
+        "{}",
+        stdout(&whole)
+    );
+    assert_eq!(broken.status.code(), Some(1));
+    let out = stdout(&broken);
+    assert_eq!(out.lines().count(), 1, "{out}");
+    assert!(out.contains("src/Lost.java: error: cannot walk: "), "{out}");
+}

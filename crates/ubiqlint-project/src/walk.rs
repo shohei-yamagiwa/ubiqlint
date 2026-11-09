@@ -25,8 +25,9 @@ pub struct Walk {
     pub files: Vec<PathBuf>,
     /// The paths that could not be walked, in the order they were met.
     /// Silently skipping a directory would hide violations, so these are
-    /// problems. Errors under an excluded path, or on files no adapter
-    /// handles, are left out: they are not ours to check.
+    /// problems. Errors under an excluded path, on files no adapter
+    /// handles, or beyond the scopes of a limited walk are left out: they
+    /// are not ours to check.
     pub errors: Vec<WalkError>,
 }
 
@@ -78,7 +79,12 @@ pub(crate) fn walk(project: &Project, scopes: &[PathBuf]) -> Walk {
                 let message = error_message(&error);
                 if let Some(path) = error_path(&error) {
                     let relative = path.strip_prefix(read_root).unwrap_or(path);
-                    if excludes.matches(relative) {
+                    // walkdir reports some errors, such as a dangling
+                    // symlink, before `filter_entry` sees the entry, so a
+                    // walk limited to scopes must leave out errors beyond
+                    // them. Errors on the directories leading to a scope
+                    // still matter: they may hide the scope itself.
+                    if excludes.matches(relative) || !leads_into(scopes, relative) {
                         continue;
                     }
                     // A directory that cannot be read may hide violations;
@@ -116,7 +122,7 @@ fn within(scopes: &[PathBuf], relative: &Path) -> bool {
 }
 
 /// Whether the directory at `relative` is in one of `scopes`, or on the way
-/// to one.
+/// to one. A walk error on such a path is within the walk's scope.
 fn leads_into(scopes: &[PathBuf], relative: &Path) -> bool {
     scopes.is_empty()
         || scopes
