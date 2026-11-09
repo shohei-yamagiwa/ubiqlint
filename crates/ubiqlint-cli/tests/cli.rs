@@ -179,6 +179,52 @@ tests/fixtures/check/bad/src/main/java/com/example/order/domain/PurchaseService.
 }
 
 #[test]
+fn check_reports_import_and_naming_violations_together() {
+    let output = ubiqlint(&[
+        "check",
+        "--config",
+        "tests/fixtures/check/imports/ubiqlint.yaml",
+    ]);
+    assert_eq!(output.status.code(), Some(1));
+    let prefix = "tests/fixtures/check/imports/src/domain";
+    assert_eq!(stdout(&output), format!("\
+{prefix}/Bad.java:3:1: error: external import `com.vendor.Order` conflicts with dictionary term `Order` in `tests/fixtures/check/imports/terms.yaml` under rule `domain-imports`: use the fully qualified name `com.vendor.Order` instead
+{prefix}/Bad.java:4:1: error: external wildcard import `com.vendor.*` is forbidden by rule `domain-imports`: import non-conflicting names explicitly, or use fully qualified names
+{prefix}/Bad.java:5:1: error: external import `com.vendor.Container.LineItem` conflicts with dictionary term `LineItem` in `tests/fixtures/check/imports/terms.yaml` under rule `domain-imports`: use the fully qualified name `com.vendor.Container.LineItem` instead
+{prefix}/Bad.java:6:1: error: external wildcard import `com.vendor.Order.*` is forbidden by rule `domain-imports`: import non-conflicting names explicitly, or use fully qualified names
+{prefix}/Bad.java:7:1: error: external import `com.example.ordering.Order` conflicts with dictionary term `Order` in `tests/fixtures/check/imports/terms.yaml` under rule `domain-imports`: use the fully qualified name `com.example.ordering.Order` instead
+{prefix}/Bad.java:9:7: error: `Purchase` does not match any pattern of rule `domain-type`: expected one of `{{noun}}`. If `Purchase` is a new term or behavior of the ubiquitous language, define it in `tests/fixtures/check/imports/terms.yaml` first
+{prefix}/Broken.java:2:14: error: syntax error: missing `}}`
+"));
+    assert_eq!(stderr(&output), "");
+}
+
+#[test]
+fn import_collisions_use_the_dictionary_override() {
+    let output = ubiqlint(&[
+        "check",
+        "--config",
+        "tests/fixtures/check/imports/ubiqlint.yaml",
+        "--dictionary",
+        "tests/fixtures/check/imports/empty-terms.yaml",
+    ]);
+    assert_eq!(output.status.code(), Some(1));
+    let out = stdout(&output);
+    assert!(!out.contains("conflicts with dictionary term"), "{out}");
+    assert_eq!(out.matches("external wildcard import").count(), 2);
+    assert!(!out.contains("Allowed.java:3:"), "{out}");
+    assert!(!out.contains("OrderDto.java"), "{out}");
+    assert!(!out.contains("Generated.java"), "{out}");
+}
+
+#[test]
+fn validate_accepts_import_rules() {
+    let output = ubiqlint(&["validate", "tests/fixtures/check/imports/ubiqlint.yaml"]);
+    assert!(output.status.success(), "{}", stdout(&output));
+    assert_eq!(stdout(&output), "");
+}
+
+#[test]
 fn check_reports_an_unreadable_config() {
     let output = ubiqlint(&[
         "check",

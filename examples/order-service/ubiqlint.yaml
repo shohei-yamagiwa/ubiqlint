@@ -29,3 +29,12 @@ rules:
     patterns:
       - "get{any}"
       - "set{any}"
+
+import_rules:
+  - id: order-imports
+    include: ["src/main/java/com/example/order/domain/**"]
+    internal_namespaces: [com.example.order]
+
+  - id: billing-imports
+    include: ["src/main/java/com/example/billing/domain/**"]
+    internal_namespaces: [com.example.billing]

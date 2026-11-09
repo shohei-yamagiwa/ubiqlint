@@ -1,0 +1,12 @@
+exclude: ["src/domain/generated/**"]
+
+rules:
+  - id: domain-type
+    include: ["src/domain/**"]
+    target: type
+    patterns: ["{noun}"]
+
+import_rules:
+  - id: domain-imports
+    include: ["src/domain/**"]
+    internal_namespaces: [com.example.order, com.example.shared]

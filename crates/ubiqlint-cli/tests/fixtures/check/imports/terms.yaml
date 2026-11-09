@@ -1,0 +1,6 @@
+context: order
+terms:
+  - name: Order
+    forms: { singular: order, plural: orders }
+  - name: LineItem
+    forms: { singular: line item, plural: line items }

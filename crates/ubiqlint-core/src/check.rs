@@ -1,4 +1,4 @@
-//! Checking the symbols of a file against the rules that apply to it.
+//! Checking declarations and imports against the rules that apply to a file.
 //!
 //! An identifier is split into words by [`identifier::split`] and matched
 //! against the patterns of every rule whose target and `include` globs apply
@@ -7,7 +7,12 @@
 //! of the innermost enclosing type, and may then only use a form of one of
 //! that term's defined behaviors. The policy for identifiers with multiple
 //! nouns is provisional; see section 8 of `docs/plan.md`.
+//!
+//! Imports from external namespaces may not introduce a dictionary term's
+//! canonical name or use a wildcard. Internal namespace prefixes and the
+//! paths to protect are explicitly configured in import rules.
 
+use std::collections::HashSet;
 use std::path::Path;
 
 use crate::config::{Config, Rule};
@@ -16,13 +21,16 @@ use crate::dictionary::Dictionary;
 use crate::identifier;
 use crate::matching::{MatchMode, Matcher};
 use crate::pattern::{Element, NounForm, Pattern, VerbForm};
+use crate::source::SourceFile;
 use crate::symbol::{Name, SymbolKind, Symbols};
 
-/// Checks symbols against rules, using one dictionary and one configuration.
+/// Checks declarations and imports using one dictionary and one configuration.
 pub struct Checker<'a> {
     config: &'a Config,
     dictionary_path: &'a Path,
     matcher: Matcher<'a>,
+    /// Canonical type spellings, compared exactly rather than split as words.
+    term_names: HashSet<&'a str>,
 }
 
 /// Prepared once per symbol and shared by all its applicable rules.
@@ -50,7 +58,60 @@ impl<'a> Checker<'a> {
             config,
             dictionary_path,
             matcher: Matcher::new(dictionary, config),
+            term_names: dictionary
+                .terms
+                .iter()
+                .map(|term| term.name.as_str())
+                .collect(),
         }
+    }
+
+    /// Checks declarations and imports, returning diagnostics in source order.
+    /// Paths are relative to the configuration file's directory. An excluded
+    /// file is never checked.
+    pub fn check_file(&self, file: &SourceFile, path: &Path) -> Vec<Diagnostic> {
+        if self.config.excludes().matches(path) {
+            return Vec::new();
+        }
+        let mut diagnostics = self.check(&file.symbols, path);
+        let rules: Vec<_> = self
+            .config
+            .import_rules
+            .iter()
+            .filter(|rule| rule.includes(path))
+            .collect();
+        for import in &file.imports {
+            for rule in &rules {
+                if rule.is_internal(import.namespace()) {
+                    continue;
+                }
+                let path = import.path.join(".");
+                let message = if import.wildcard {
+                    format!(
+                        "external wildcard import `{path}.*` is forbidden by rule `{}`: \
+                         import non-conflicting names explicitly, or use fully qualified names",
+                        rule.id
+                    )
+                } else if let Some(name) =
+                    import.name().filter(|name| self.term_names.contains(name))
+                {
+                    format!(
+                        "external import `{path}` conflicts with dictionary term `{name}` \
+                         in `{}` under rule `{}`: use the fully qualified name `{path}` instead",
+                        self.dictionary_path.display(),
+                        rule.id
+                    )
+                } else {
+                    continue;
+                };
+                diagnostics.push(Diagnostic {
+                    location: import.span.start,
+                    message,
+                });
+            }
+        }
+        diagnostics.sort_by_key(|diagnostic| diagnostic.location);
+        diagnostics
     }
 
     /// Checks every symbol of `symbols` against the rules that apply to
