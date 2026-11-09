@@ -3,7 +3,8 @@
 
 use saphyr::{LoadableYamlNode, MarkedYaml, Marker, Scalar, YamlData};
 
-use crate::diagnostic::{Diagnostic, Location};
+use crate::diagnostic::Diagnostic;
+use crate::location::Location;
 use crate::words::Words;
 
 pub(crate) type Node<'input> = MarkedYaml<'input>;
