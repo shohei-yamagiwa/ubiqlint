@@ -81,13 +81,25 @@ pub(crate) fn check_files(config: &Path, params: &CheckFilesParams) -> CallToolR
     let paths: Vec<PathBuf> = params.paths.iter().map(PathBuf::from).collect();
     let selection = project.select(&paths);
 
+    let mut dictionaries = project.nearest_dictionaries();
+    // A missing or broken dictionary is reported once, however many files
+    // use it.
+    let mut reported = HashSet::new();
+    let mut problems = Vec::new();
+    // As in CI, a broken root dictionary is a problem even if no file
+    // checked here uses it.
+    if let Err(error) = dictionaries.check_root() {
+        reported.insert(error.path().to_owned());
+        problems.extend(report::resolution_error(&error));
+    }
     // A given path outside the project is the caller's mistake: report it
     // with the rest, and mark the result as an error.
-    let mut problems: Vec<_> = selection
-        .outside
-        .iter()
-        .map(|path| outside_line(&path.display().to_string()))
-        .collect();
+    problems.extend(
+        selection
+            .outside
+            .iter()
+            .map(|path| outside_line(&path.display().to_string())),
+    );
     let notes: Vec<_> = selection
         .skipped
         .iter()
@@ -100,21 +112,20 @@ pub(crate) fn check_files(config: &Path, params: &CheckFilesParams) -> CallToolR
             .map(|error| report::walk_error(&project, error)),
     );
 
-    let mut dictionaries = project.nearest_dictionaries();
     let mut run = CheckRun::new(
         &project,
         &mut dictionaries,
         selection.files.iter().map(PathBuf::as_path),
     );
-    // A missing or broken dictionary is reported once, however many files
-    // use it.
-    let mut reported = HashSet::new();
-    let mut checked = 0;
+    let mut attempted = 0;
+    // Files that parse but that no rule applies to: unlike files without
+    // problems, their names and imports were not checked at all.
+    let mut no_rules = Vec::new();
     for relative in &selection.files {
         if project.skip(relative).is_some() {
             continue;
         }
-        checked += 1;
+        attempted += 1;
         let path = project.root().join(relative);
         let source = match fs::read_to_string(&path) {
             Ok(source) => source,
@@ -124,7 +135,8 @@ pub(crate) fn check_files(config: &Path, params: &CheckFilesParams) -> CallToolR
             }
         };
         match run.check(relative, &source) {
-            FileReport::Skipped(_) | FileReport::NoRules => {}
+            FileReport::Skipped(_) => {}
+            FileReport::NoRules => no_rules.push(path),
             FileReport::SyntaxErrors(diagnostics) | FileReport::Checked(diagnostics) => {
                 problems.extend(report::diagnostics(&path, &diagnostics));
             }
@@ -153,8 +165,28 @@ pub(crate) fn check_files(config: &Path, params: &CheckFilesParams) -> CallToolR
         ));
     }
     lines.extend(notes);
-    lines.push(if checked == 0 {
+    let reason = format!(
+        "names and imports not checked: no rule in `{}` applies to it",
+        config.display()
+    );
+    lines.extend(
+        no_rules
+            .iter()
+            .take(limit)
+            .map(|path| format!("{}: warning: {reason}", path.display())),
+    );
+    if no_rules.len() > limit {
+        let more = no_rules.len() - limit;
+        lines.push(format!(
+            "... and {} that no rule applies to.",
+            count(more, "more file", "more files")
+        ));
+    }
+    let checked = attempted - no_rules.len();
+    lines.push(if attempted == 0 {
         "No source files were checked.".to_owned()
+    } else if checked == 0 {
+        "No source files were checked against the rules.".to_owned()
     } else if total == 0 {
         format!("Checked {}: no problems.", count(checked, "file", "files"))
     } else {

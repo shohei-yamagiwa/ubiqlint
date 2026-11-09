@@ -541,11 +541,11 @@ fn check(
             dictionary: loaded,
         }
     } else {
-        let mut resolver = DictionaryResolver::new(root);
-        if let Err(error) = resolver.root_dictionary() {
+        let mut dictionaries = Dictionaries::Nearest(DictionaryResolver::new(root));
+        if let Err(error) = dictionaries.check_root() {
             reporter.resolution_error(&error);
         }
-        Dictionaries::Nearest(resolver)
+        dictionaries
     };
     let Some(project) = project else {
         return;

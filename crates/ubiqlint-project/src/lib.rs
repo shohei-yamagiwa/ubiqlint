@@ -107,6 +107,18 @@ pub enum Dictionaries {
     Nearest(DictionaryResolver),
 }
 
+impl Dictionaries {
+    /// Loads the optional dictionary at the root itself, so that a broken
+    /// one is reported even when no source file uses it, as CI reports it.
+    /// A fixed dictionary has no root dictionary to check.
+    pub fn check_root(&mut self) -> Result<(), ResolutionError> {
+        match self {
+            Dictionaries::Fixed { .. } => Ok(()),
+            Dictionaries::Nearest(resolver) => resolver.root_dictionary().map(drop),
+        }
+    }
+}
+
 /// The result of checking one source file.
 #[derive(Clone, Debug)]
 pub enum FileReport {

@@ -664,3 +664,96 @@ fn stops_without_an_error_when_the_client_leaves_before_a_session() {
         assert_eq!(answers.lines().count(), input.lines().count(), "{answers}");
     }
 }
+
+impl TempProject {
+    /// A project whose rules only cover `src/**`, with a valid dictionary
+    /// for `src`, a conforming `src/Order.java` and a rule-less
+    /// `tests/Bad.java`.
+    fn with_rules_for_src_only() -> Self {
+        let project = Self::copy("tests/fixtures/check/nofiles");
+        let write = |path: &str, contents: &str| {
+            let path = project.0.join(path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, contents).unwrap();
+        };
+        write(
+            "ubiqlint.yaml",
+            "rules:\n  - id: domain-method\n    include: [\"src/**\"]\n    target: method\n    patterns:\n      - \"{verb}\"\n",
+        );
+        let _ = fs::remove_file(project.0.join("terms.yaml"));
+        write(
+            "src/terms.yaml",
+            "context: order\nterms:\n  - name: Order\n    forms: { singular: order, plural: orders }\n    behaviors:\n      - verb: place\n        forms: { base: place, s: places, past: placed, pp: placed, ing: placing }\n",
+        );
+        write("src/Order.java", "class Order { void place() {} }\n");
+        write("tests/Bad.java", "class Bad { void update() {} }\n");
+        project
+    }
+}
+
+/// A file that no rule applies to was only parsed: it must not read as one
+/// whose names follow the rules.
+#[test]
+fn check_files_tells_files_that_no_rule_applies_to_from_files_without_problems() {
+    let project = TempProject::with_rules_for_src_only();
+    let mut server = Server::start(&project.config());
+    let not_checked = "tests/Bad.java: warning: names and imports not checked: no rule in `ubiqlint.yaml` \
+         applies to it";
+
+    let (error, text) = server.call("check_files", json!({"paths": ["tests/Bad.java"]}));
+    assert!(!error, "{text}");
+    assert_eq!(
+        text,
+        format!("{not_checked}\nNo source files were checked against the rules.")
+    );
+
+    let (error, text) = server.call("check_files", json!({}));
+    assert!(!error, "{text}");
+    assert_eq!(text, format!("{not_checked}\nChecked 1 file: no problems."));
+
+    let (error, text) = server.call(
+        "check_files",
+        json!({"limit": 1, "paths": ["tests", "src"]}),
+    );
+    assert!(!error, "{text}");
+    assert_eq!(text, format!("{not_checked}\nChecked 1 file: no problems."));
+}
+
+/// CI reports a broken root dictionary even when no source file uses it,
+/// so `check_files` must too, or a change it passes would fail CI.
+#[test]
+fn check_files_reports_a_broken_root_dictionary_as_the_command_line_does() {
+    let project = TempProject::with_rules_for_src_only();
+    fs::write(
+        project.0.join("terms.yaml"),
+        "context: broken\nterms: wrong\n",
+    )
+    .unwrap();
+    let mut server = Server::start(&project.config());
+
+    let cli = Command::new(env!("CARGO_BIN_EXE_ubiqlint"))
+        .arg("check")
+        .current_dir(&project.0)
+        .output()
+        .unwrap();
+    let expected = String::from_utf8(cli.stdout).unwrap();
+    assert_eq!(
+        expected,
+        "terms.yaml:2:8: error: expected `terms` to be a sequence, found a string\n"
+    );
+
+    for arguments in [json!({}), json!({"paths": ["src/Order.java"]})] {
+        let (error, text) = server.call("check_files", arguments.clone());
+        assert!(!error, "{arguments}: {text}");
+        assert!(text.starts_with(&expected), "{arguments}: {text}");
+        assert_eq!(
+            text.matches("terms.yaml:2:8:").count(),
+            1,
+            "{arguments}: {text}"
+        );
+        assert!(
+            text.ends_with("Checked 1 file: 1 problem."),
+            "{arguments}: {text}"
+        );
+    }
+}
