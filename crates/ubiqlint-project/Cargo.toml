@@ -1,0 +1,13 @@
+[package]
+name = "ubiqlint-project"
+description = "The checks of a ubiqlint project, shared by its command line and servers"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ignore.workspace = true
+ubiqlint-core.workspace = true
+ubiqlint-java.workspace = true

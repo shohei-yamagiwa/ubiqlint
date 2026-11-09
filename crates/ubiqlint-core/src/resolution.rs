@@ -100,12 +100,12 @@ impl DictionaryResolver {
         self.resolve(Path::new(DICTIONARY_FILE_NAME))
     }
 
-    /// Borrows a successfully loaded dictionary by its resolved path,
-    /// without any filesystem access. Resolve the source paths first, then
-    /// use shared borrows to keep one checker per dictionary for the run.
-    pub fn loaded_dictionary(&self, path: &Path) -> Option<&Dictionary> {
-        match self.dictionaries.get(path) {
-            Some(Ok(Some(dictionary))) => Some(dictionary),
+    /// Borrows a successfully loaded dictionary and its path by the resolved
+    /// path, without any filesystem access. Resolve the source paths first,
+    /// then use shared borrows to keep one checker per dictionary for the run.
+    pub fn loaded_dictionary(&self, path: &Path) -> Option<ResolvedDictionary<'_>> {
+        match self.dictionaries.get_key_value(path) {
+            Some((path, Ok(Some(dictionary)))) => Some(ResolvedDictionary { path, dictionary }),
             _ => None,
         }
     }
@@ -401,8 +401,9 @@ mod tests {
 
         let root = resolver.loaded_dictionary(&root_path).unwrap();
         let nested = resolver.loaded_dictionary(&nested_path).unwrap();
-        assert_eq!(root.context, "root");
-        assert_eq!(nested.context, "nested");
+        assert_eq!(root.path, root_path);
+        assert_eq!(root.dictionary.context, "root");
+        assert_eq!(nested.dictionary.context, "nested");
         assert!(
             resolver
                 .loaded_dictionary(&project.0.join("missing/terms.yaml"))
