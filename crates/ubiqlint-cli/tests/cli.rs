@@ -591,3 +591,302 @@ fn check_exits_1_instead_of_panicking_when_the_output_pipe_is_closed() {
     let status = child.wait().expect("failed to wait for ubiqlint");
     assert_eq!(status.code(), Some(1));
 }
+
+const BAD: &str = "tests/fixtures/check/bad";
+
+#[test]
+fn check_only_checks_the_given_files() {
+    let output = ubiqlint(&[
+        "check",
+        "--config",
+        &format!("{BAD}/ubiqlint.yaml"),
+        &format!("{BAD}/src/main/java/com/example/order/domain/Order.java"),
+    ]);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        stdout(&output),
+        format!(
+            "{BAD}/src/main/java/com/example/order/domain/Order.java:7:17: error: `updateOrder` \
+             does not match pattern `{{verb}}{{noun}}` of rule `domain-method`: `update` is not a \
+             defined behavior of `Order` (defined behaviors: `place`, `cancel`)\n"
+        )
+    );
+    assert_eq!(stderr(&output), "");
+}
+
+#[test]
+fn check_walks_the_given_directories_like_the_whole_tree() {
+    let whole = ubiqlint(&["check", "--config", &format!("{BAD}/ubiqlint.yaml")]);
+    let output = ubiqlint(&[
+        "check",
+        "--config",
+        &format!("{BAD}/ubiqlint.yaml"),
+        &format!("{BAD}/src/main/java/com/example/order"),
+    ]);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(stdout(&output), stdout(&whole));
+    assert_eq!(stdout(&output).lines().count(), 3);
+
+    // The configuration directory itself is the whole tree.
+    let output = ubiqlint(&["check", "--config", &format!("{BAD}/ubiqlint.yaml"), BAD]);
+    assert_eq!(stdout(&output), stdout(&whole));
+}
+
+#[test]
+fn check_reports_each_given_file_once_in_path_order() {
+    let domain = format!("{BAD}/src/main/java/com/example/order/domain");
+    let output = ubiqlint(&[
+        "check",
+        "--config",
+        &format!("{BAD}/ubiqlint.yaml"),
+        &format!("{domain}/PurchaseService.java"),
+        &format!("{domain}/Order.java"),
+        &format!("{domain}/./Order.java"),
+        &domain,
+    ]);
+
+    let out = stdout(&output);
+    let lines: Vec<_> = out.lines().collect();
+    assert_eq!(lines.len(), 3, "{out}");
+    assert!(
+        lines[0].starts_with(&format!("{domain}/Broken.java:")),
+        "{out}"
+    );
+    assert!(
+        lines[1].starts_with(&format!("{domain}/Order.java:")),
+        "{out}"
+    );
+    assert!(
+        lines[2].starts_with(&format!("{domain}/PurchaseService.java:")),
+        "{out}"
+    );
+}
+
+#[test]
+fn check_accepts_paths_relative_to_the_current_directory_with_the_default_config() {
+    let output = Command::new(env!("CARGO_BIN_EXE_ubiqlint"))
+        .args(["check", "src/main/java/com/example/order/domain/Order.java"])
+        .current_dir(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(BAD))
+        .output()
+        .expect("failed to run ubiqlint");
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        stdout(&output).starts_with("src/main/java/com/example/order/domain/Order.java:7:17: "),
+        "{}",
+        stdout(&output)
+    );
+    assert_eq!(stdout(&output).lines().count(), 1);
+}
+
+#[test]
+fn check_accepts_absolute_paths() {
+    let absolute = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join(BAD)
+        .join("src/main/java/com/example/order/domain/Order.java");
+    let output = ubiqlint(&[
+        "check",
+        "--config",
+        &format!("{BAD}/ubiqlint.yaml"),
+        absolute.to_str().unwrap(),
+    ]);
+
+    // Paths in problems still join the configuration directory, as given.
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        stdout(&output).starts_with(&format!(
+            "{BAD}/src/main/java/com/example/order/domain/Order.java:7:17: "
+        )),
+        "{}",
+        stdout(&output)
+    );
+}
+
+#[test]
+fn check_rejects_paths_outside_the_configuration_directory_and_checks_the_rest() {
+    let output = ubiqlint(&[
+        "check",
+        "--config",
+        &format!("{BAD}/ubiqlint.yaml"),
+        "tests/fixtures/check/ok/src/main/java/com/example/order/domain/Order.java",
+        &format!("{BAD}/../ok"),
+        &format!("{BAD}/src/main/java/com/example/order/domain/Order.java"),
+    ]);
+
+    assert_eq!(output.status.code(), Some(1));
+    let out = stdout(&output);
+    assert_eq!(out.lines().count(), 3, "{out}");
+    assert!(out.contains(&format!(
+        "tests/fixtures/check/ok/src/main/java/com/example/order/domain/Order.java: error: \
+         not under the configuration directory `{BAD}`\n"
+    )));
+    assert!(out.contains(&format!(
+        "{BAD}/../ok: error: not under the configuration directory `{BAD}`\n"
+    )));
+    assert!(out.contains(&format!(
+        "{BAD}/src/main/java/com/example/order/domain/Order.java:7:17: error: "
+    )));
+}
+
+#[test]
+fn check_rejects_only_invalid_paths_without_falling_back_to_the_whole_tree() {
+    let output = ubiqlint(&[
+        "check",
+        "--config",
+        &format!("{BAD}/ubiqlint.yaml"),
+        "tests/fixtures/check/ok",
+    ]);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        stdout(&output),
+        format!("tests/fixtures/check/ok: error: not under the configuration directory `{BAD}`\n")
+    );
+    assert_eq!(stderr(&output), "warning: no source files were checked\n");
+}
+
+#[test]
+fn check_warns_about_given_files_it_does_not_check() {
+    let fixture = "tests/fixtures/check/excluded";
+    let output = ubiqlint(&[
+        "check",
+        "--config",
+        &format!("{fixture}/ubiqlint.yaml"),
+        &format!("{fixture}/src/main/java/com/example/order/generated/Generated.java"),
+        &format!("{fixture}/terms.yaml"),
+    ]);
+
+    // Warnings never fail the run.
+    assert!(output.status.success(), "{}", stdout(&output));
+    assert_eq!(stdout(&output), "");
+    assert_eq!(
+        stderr(&output),
+        format!(
+            "{fixture}/src/main/java/com/example/order/generated/Generated.java: warning: \
+             not checked: it matches `exclude` in the configuration\n\
+             {fixture}/terms.yaml: warning: not checked: ubiqlint cannot check this kind of file\n\
+             warning: no source files were checked\n"
+        )
+    );
+}
+
+#[test]
+fn check_never_descends_into_a_given_excluded_directory() {
+    let fixture = "tests/fixtures/check/excluded";
+    let output = ubiqlint(&[
+        "check",
+        "--config",
+        &format!("{fixture}/ubiqlint.yaml"),
+        &format!("{fixture}/src/main/java/com/example/order/generated"),
+    ]);
+
+    assert!(output.status.success(), "{}", stdout(&output));
+    assert_eq!(stdout(&output), "");
+    assert_eq!(stderr(&output), "warning: no source files were checked\n");
+}
+
+#[test]
+fn check_applies_gitignore_to_given_directories_but_not_to_given_files() {
+    let fixture = "tests/fixtures/check/gitignored";
+    let config = format!("{fixture}/ubiqlint.yaml");
+
+    // A walk from `src/main/java` still sees the `.gitignore` above it.
+    let output = ubiqlint(&[
+        "check",
+        "--config",
+        &config,
+        &format!("{fixture}/src/main/java"),
+    ]);
+    assert!(output.status.success(), "{}", stdout(&output));
+    assert_eq!(stdout(&output), "");
+    assert_eq!(stderr(&output), "");
+
+    // A file named directly is checked anyway: `.gitignore` only applies
+    // to finding files.
+    let bad = format!("{fixture}/src/main/java/ignored/Bad.java");
+    let output = ubiqlint(&["check", "--config", &config, &bad]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        stdout(&output).starts_with(&format!("{bad}:2:17: error: `update`")),
+        "{}",
+        stdout(&output)
+    );
+}
+
+#[test]
+fn check_reports_a_given_file_that_does_not_exist() {
+    let missing = format!("{BAD}/src/main/java/com/example/order/domain/Missing.java");
+    let output = ubiqlint(&[
+        "check",
+        "--config",
+        &format!("{BAD}/ubiqlint.yaml"),
+        &missing,
+    ]);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        stdout(&output).starts_with(&format!("{missing}: error: cannot read the file: ")),
+        "{}",
+        stdout(&output)
+    );
+    assert_eq!(stdout(&output).lines().count(), 1);
+}
+
+// A dangling symlink can only be created at test time.
+#[cfg(unix)]
+#[test]
+fn check_reports_walk_errors_only_within_the_given_directories() {
+    use std::os::unix::fs::symlink;
+
+    let dir = std::env::temp_dir().join(format!("ubiqlint-check-scoped-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::write(
+        dir.join("ubiqlint.yaml"),
+        "rules:\n  - id: domain-method\n    include: [\"src/**\"]\n    target: method\n    patterns:\n      - \"{verb}\"\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("terms.yaml"),
+        "context: order\nterms:\n  - name: Order\n    forms: { singular: order, plural: orders }\n    behaviors:\n      - verb: place\n        forms: { base: place, s: places, past: placed, pp: placed, ing: placing }\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("src/Order.java"),
+        "public class Order {\n    public void place() {\n    }\n}\n",
+    )
+    .unwrap();
+    // Outside the scope `src`: the walk still meets it, walking from the
+    // configuration directory.
+    symlink("nowhere", dir.join("Gone.java")).unwrap();
+    let config = dir.join("ubiqlint.yaml");
+    let config = config.to_str().unwrap();
+    let src = dir.join("src");
+    let src = src.to_str().unwrap();
+
+    let scoped = ubiqlint(&["check", "--config", config, src]);
+    let whole = ubiqlint(&["check", "--config", config]);
+    // Inside the scope, the same kind of error is still reported.
+    symlink("nowhere", dir.join("src/Lost.java")).unwrap();
+    let broken = ubiqlint(&["check", "--config", config, src]);
+    let _ = fs::remove_dir_all(&dir);
+
+    assert!(
+        scoped.status.success(),
+        "unexpected output: {}",
+        stdout(&scoped)
+    );
+    assert_eq!(stdout(&scoped), "");
+    assert_eq!(whole.status.code(), Some(1));
+    assert!(
+        stdout(&whole).contains("Gone.java: error: cannot walk: "),
+        "{}",
+        stdout(&whole)
+    );
+    assert_eq!(broken.status.code(), Some(1));
+    let out = stdout(&broken);
+    assert_eq!(out.lines().count(), 1, "{out}");
+    assert!(out.contains("src/Lost.java: error: cannot walk: "), "{out}");
+}

@@ -14,6 +14,7 @@ repository = "https://github.com/shohei-yamagiwa/ubiqlint"
 [workspace.dependencies]
 ubiqlint-core = { path = "crates/ubiqlint-core" }
 ubiqlint-java = { path = "crates/ubiqlint-java" }
+ubiqlint-project = { path = "crates/ubiqlint-project" }
 clap = { version = "4", features = ["derive"] }
 globset = "0.4"
 ignore = "0.4"

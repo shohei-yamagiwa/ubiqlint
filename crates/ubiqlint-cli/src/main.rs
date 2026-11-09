@@ -1,18 +1,19 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{ArgGroup, Args, Parser, Subcommand};
-use ignore::WalkBuilder;
 use ubiqlint_core::dictionary::validate_term_name;
 use ubiqlint_core::{
-    BehaviorChanges, CONFIG_FILE_NAME, Checker, Config, DICTIONARY_FILE_NAME, Diagnostic,
-    Dictionary, DictionaryResolver, Edit, EditError, Excludes, FieldChange, LanguageAdapter,
-    NewTerm, Outcome, ResolutionError, TermChanges, VerbForms, Words,
+    BehaviorChanges, CONFIG_FILE_NAME, Config, DICTIONARY_FILE_NAME, Diagnostic, Dictionary,
+    DictionaryResolver, Edit, EditError, FieldChange, NewTerm, ResolutionError, TermChanges,
+    VerbForms, Words,
 };
-use ubiqlint_java::JavaAdapter;
+use ubiqlint_project::{
+    CheckRun, Dictionaries, EditFileError, EditOutcome, FileReport, LoadError, Project, Skip,
+};
 
 /// A linter for a ubiquitous language.
 #[derive(Parser)]
@@ -41,6 +42,10 @@ enum Command {
         /// the nearest `terms.yaml` up to the configuration directory
         #[arg(long)]
         dictionary: Option<PathBuf>,
+        /// Files or directories to check, under the configuration file's
+        /// directory. Defaults to everything under it
+        #[arg(value_name = "PATHS")]
+        paths: Vec<PathBuf>,
     },
     /// Add, edit or remove a term of a dictionary
     #[command(subcommand)]
@@ -222,16 +227,15 @@ fn parse_text(text: &str) -> Result<String, String> {
     }
 }
 
-/// The adapters for the languages ubiqlint can check.
-const ADAPTERS: [&dyn LanguageAdapter; 1] = [&JavaAdapter];
-
 fn main() -> ExitCode {
     let mut reporter = Reporter::new();
     match Cli::parse().command {
         Command::Validate { files } => validate(&mut reporter, &files),
-        Command::Check { config, dictionary } => {
-            check(&mut reporter, &config, dictionary.as_deref())
-        }
+        Command::Check {
+            config,
+            dictionary,
+            paths,
+        } => check(&mut reporter, &config, dictionary.as_deref(), &paths),
         Command::Term(command) => {
             let (file, request) = term_request(command);
             edit_dictionary(&mut reporter, &file.dictionary, &request);
@@ -404,34 +408,30 @@ fn behavior_request(command: BehaviorCommand) -> (DictionaryFile, EditRequest) {
 /// Applies an edit to the dictionary at `path` and writes it back, or
 /// reports why it was refused, leaving the file as it was.
 fn edit_dictionary(reporter: &mut Reporter, path: &Path, request: &EditRequest) {
-    let Some(source) = read_file(reporter, path) else {
-        return;
-    };
-    match ubiqlint_core::edit::apply(&source, &request.edit) {
-        Ok(Outcome::Changed(text)) => match replace_file(path, &text) {
-            Ok(()) => {
-                reporter.line(&format!("{}: {}", path.display(), request.done));
-            }
-            Err(error) => reporter.problem(&format!(
-                "{}: error: cannot write the file: {error}",
-                path.display()
-            )),
-        },
-        Ok(Outcome::Unchanged) => {
+    match ubiqlint_project::edit_dictionary(path, &request.edit) {
+        Ok(EditOutcome::Changed) => {
+            reporter.line(&format!("{}: {}", path.display(), request.done));
+        }
+        Ok(EditOutcome::Unchanged) => {
             reporter.line(&format!(
                 "{}: no changes: {} already has these values",
                 path.display(),
                 request.subject
             ));
         }
-        Err(EditError::InvalidDictionary(diagnostics)) => {
+        Err(EditFileError::Read(error)) => reporter.read_error(path, &error),
+        Err(EditFileError::Write(error)) => reporter.problem(&format!(
+            "{}: error: cannot write the file: {error}",
+            path.display()
+        )),
+        Err(EditFileError::Edit(EditError::InvalidDictionary(diagnostics))) => {
             reporter.diagnostics(path, &diagnostics);
             reporter.problem(&format!(
                 "{}: error: cannot edit an invalid dictionary; fix the problems above first",
                 path.display()
             ));
         }
-        Err(EditError::Rejected(problems)) => {
+        Err(EditFileError::Edit(EditError::Rejected(problems))) => {
             for problem in problems {
                 reporter.problem(&format!(
                     "{}: error: {}",
@@ -440,61 +440,12 @@ fn edit_dictionary(reporter: &mut Reporter, path: &Path, request: &EditRequest) 
                 ));
             }
         }
-        Err(EditError::Layout(message)) => reporter.problem(&format!(
+        Err(EditFileError::Edit(EditError::Layout(message))) => reporter.problem(&format!(
             "{}: error: {}",
             path.display(),
             single_line(&message)
         )),
     }
-}
-
-/// Replaces the contents of the file at `path` all at once: the text is
-/// written to a temporary file next to it, which then takes its place. A
-/// failure midway leaves the old file untouched. A symlink keeps pointing
-/// to the same file, which keeps its permissions. If something already
-/// exists at the temporary path, nothing is written and it is left alone.
-fn replace_file(path: &Path, contents: &str) -> io::Result<()> {
-    let target = fs::canonicalize(path)?;
-    let permissions = fs::metadata(&target)?.permissions();
-    let temporary = temporary_path(&target)?;
-    // Create the file only if nothing is there: an existing path, perhaps
-    // a symlink to an unrelated file, must not be written through.
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&temporary)
-        .map_err(|error| {
-            io::Error::new(
-                error.kind(),
-                format!(
-                    "cannot create the temporary file `{}`: {error}",
-                    temporary.display()
-                ),
-            )
-        })?;
-    let written = (|| {
-        file.write_all(contents.as_bytes())?;
-        file.set_permissions(permissions)?;
-        file.sync_all()?;
-        fs::rename(&temporary, &target)
-    })();
-    // Only the file created above is cleaned up.
-    if written.is_err() {
-        let _ = fs::remove_file(&temporary);
-    }
-    written
-}
-
-/// The temporary file `replace_file` writes before replacing `target`: a
-/// hidden file next to it, named after it and this process.
-fn temporary_path(target: &Path) -> io::Result<PathBuf> {
-    let name = target
-        .file_name()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "not a file"))?;
-    let mut temporary = std::ffi::OsString::from(".");
-    temporary.push(name);
-    temporary.push(format!(".ubiqlint-{}.tmp", std::process::id()));
-    Ok(target.with_file_name(temporary))
 }
 
 /// Prints problems to stdout, one per line. Rust ignores SIGPIPE, so a
@@ -547,6 +498,23 @@ impl Reporter {
                 diagnostic.location,
                 single_line(&diagnostic.message)
             ));
+        }
+    }
+
+    /// Reports a file that could not be read, in the same format for
+    /// definitions and source code.
+    fn read_error(&mut self, path: &Path, error: &io::Error) {
+        self.problem(&format!(
+            "{}: error: cannot read the file: {error}",
+            path.display()
+        ));
+    }
+
+    /// Reports why a definition file could not be loaded.
+    fn load_error(&mut self, path: &Path, error: &LoadError) {
+        match error {
+            LoadError::Read(error) => self.read_error(path, error),
+            LoadError::Invalid(diagnostics) => self.diagnostics(path, diagnostics),
         }
     }
 
@@ -628,132 +596,77 @@ fn validate(reporter: &mut Reporter, files: &[PathBuf]) {
     }
 }
 
-/// Checks every source file under the configuration file's directory,
-/// printing every problem as `path:line:column: error: message`.
-fn check(reporter: &mut Reporter, config_path: &Path, dictionary: Option<&Path>) {
+/// Checks the source files under the configuration file's directory, or
+/// only those under `paths`, printing every problem as
+/// `path:line:column: error: message`.
+fn check(
+    reporter: &mut Reporter,
+    config_path: &Path,
+    dictionary: Option<&Path>,
+    paths: &[PathBuf],
+) {
     // Every checked path is relative to the configuration directory, which
     // is also the upper boundary of dictionary resolution.
-    let root = config_path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new(""));
-    let read_root = if root.as_os_str().is_empty() {
-        Path::new(".")
-    } else {
-        root
-    };
+    let root = ubiqlint_project::config_root(config_path);
     // Validate the root dictionary, if present, alongside the config so
     // both sets of definition errors are still reported in one run. A root
     // dictionary is optional: a project may only have nested contexts.
-    let config = load(reporter, config_path, Config::from_yaml_str);
-    let mut resolver = DictionaryResolver::new(root);
-    let fixed_dictionary = if let Some(path) = dictionary {
-        let loaded = load(reporter, path, Dictionary::from_yaml_str);
-        if loaded.is_none() {
+    let project = Project::open(config_path)
+        .map_err(|error| reporter.load_error(config_path, &error))
+        .ok();
+    let mut dictionaries = if let Some(path) = dictionary {
+        let Some(loaded) = load(reporter, path, Dictionary::from_yaml_str) else {
             return;
+        };
+        Dictionaries::Fixed {
+            path: path.to_owned(),
+            dictionary: loaded,
         }
-        loaded
     } else {
+        let mut resolver = DictionaryResolver::new(root);
         if let Err(error) = resolver.root_dictionary() {
             reporter.resolution_error(&error);
         }
-        None
+        Dictionaries::Nearest(resolver)
     };
-    let Some(config) = config else {
+    let Some(project) = project else {
         return;
     };
 
-    let excludes = config.excludes();
-    let files = collect_files(reporter, read_root, root, excludes);
-    // Finish dictionary loading before borrowing any checkers. This lets
-    // every source using a dictionary share its lookup indices. Only paths
-    // covered by rules need resolution; errors are reported later, after
-    // the corresponding source has passed its read and syntax checks.
-    let mut resolutions = HashMap::new();
-    if fixed_dictionary.is_none() {
-        for relative in &files {
-            if excludes.matches(relative)
-                || adapter_for(relative).is_none()
-                || !config.has_rules_for(relative)
-            {
-                continue;
-            }
-            let directory = relative
-                .parent()
-                .expect("a source path has a parent directory");
-            resolutions.entry(directory).or_insert_with(|| {
-                resolver
-                    .resolve(relative)
-                    .map(|resolved| resolved.map(|resolved| resolved.path.to_owned()))
-            });
-        }
-    }
-    let mut checkers = HashMap::new();
+    let files = select_files(reporter, &project, paths);
+    // Finish dictionary loading before checking any file. This lets every
+    // source using a dictionary share its lookup indices. Errors are
+    // reported later, after the corresponding source has passed its read
+    // and syntax checks.
+    let mut run = CheckRun::new(
+        &project,
+        &mut dictionaries,
+        files.iter().map(PathBuf::as_path),
+    );
     let mut checked = 0;
     for relative in &files {
         if reporter.broken() {
             break;
         }
-        if excludes.matches(relative) {
+        if project.skip(relative).is_some() {
             continue;
         }
-        let Some(adapter) = adapter_for(relative) else {
-            continue;
-        };
         checked += 1;
         let path = root.join(relative);
         let Some(source) = read_file(reporter, &path) else {
             continue;
         };
-        let file = match adapter.extract(&source) {
-            Ok(file) => file,
-            Err(diagnostics) => {
+        match run.check(relative, &source) {
+            // Files outside every rule still get syntax checks, but do not
+            // need a domain dictionary merely for being in the tree.
+            FileReport::Skipped(_) | FileReport::NoRules => {}
+            FileReport::SyntaxErrors(diagnostics) | FileReport::Checked(diagnostics) => {
                 reporter.diagnostics(&path, &diagnostics);
-                continue;
             }
-        };
-        // Files outside every rule still get syntax checks, as before, but
-        // do not need a domain dictionary merely for being in the tree.
-        if !config.has_rules_for(relative) {
-            continue;
+            FileReport::MissingDictionary => reporter
+                .missing_dictionary(path.parent().expect("a source file has a parent directory")),
+            FileReport::InvalidDictionary(error) => reporter.resolution_error(&error),
         }
-        let (dictionary_path, resolved_dictionary) = if let Some(fixed) = &fixed_dictionary {
-            (
-                dictionary.expect("an explicit dictionary was loaded"),
-                fixed,
-            )
-        } else {
-            match resolutions
-                .get(
-                    relative
-                        .parent()
-                        .expect("a source path has a parent directory"),
-                )
-                .expect("every applicable source directory was resolved")
-            {
-                Ok(Some(path)) => (
-                    path.as_path(),
-                    resolver
-                        .loaded_dictionary(path)
-                        .expect("a resolved dictionary was loaded successfully"),
-                ),
-                Ok(None) => {
-                    reporter.missing_dictionary(
-                        path.parent().expect("a source file has a parent directory"),
-                    );
-                    continue;
-                }
-                Err(error) => {
-                    reporter.resolution_error(error);
-                    continue;
-                }
-            }
-        };
-        let checker = checkers
-            .entry(dictionary_path)
-            .or_insert_with(|| Checker::new(resolved_dictionary, dictionary_path, &config));
-        let diagnostics = checker.check_file(&file, relative);
-        reporter.diagnostics(&path, &diagnostics);
     }
     if checked == 0 {
         // Distinguish "no violations" from "nothing was checked", which CI
@@ -763,135 +676,65 @@ fn check(reporter: &mut Reporter, config_path: &Path, dictionary: Option<&Path>)
     }
 }
 
-/// Returns the adapter that handles `path`'s extension, if any.
-fn adapter_for(path: &Path) -> Option<&'static dyn LanguageAdapter> {
-    let extension = path.extension()?.to_str()?;
-    ADAPTERS
-        .iter()
-        .find(|adapter| adapter.extensions().contains(&extension))
-        .copied()
-}
-
-/// Collects the paths of all files under `read_root`, relative to it and
-/// sorted, displayed by joining them onto `root`. `.gitignore` (and
-/// `.ignore`, `.git/info/exclude`) are respected with git's own boundary:
-/// inside a repository, `.gitignore` files above it do not apply; outside
-/// one (a tarball), only the ones inside the tree do. Hidden files such as
-/// `.git` are skipped, symlinks are followed, and directories named by a
-/// `/**`-suffixed `exclude` glob are never descended into.
+/// Returns the files to check, relative to the project root and sorted:
+/// every file under the root if no `paths` are given, or else the files
+/// under the given directories and the given files themselves.
 ///
-/// `exclude` globs apply to files as written; they never prune a directory
-/// by matching its name, so `exclude: ["src/*"]` does not swallow
-/// `src/domain`.
-///
-/// Walk errors are reported with the failed path first, since silently
-/// skipping a directory would hide violations. Errors under an excluded
-/// path, or on files no adapter handles, are not reported: they are not
-/// ours to check.
-fn collect_files(
-    reporter: &mut Reporter,
-    read_root: &Path,
-    root: &Path,
-    excludes: &Excludes,
-) -> Vec<PathBuf> {
-    let in_repo = read_root.canonicalize().is_ok_and(|dir| {
-        dir.ancestors()
-            .any(|ancestor| ancestor.join(".git").exists())
-    });
-    let mut builder = WalkBuilder::new(read_root);
-    builder
-        .follow_links(true)
-        .require_git(in_repo)
-        .parents(in_repo);
-    let filter_root = read_root.to_path_buf();
-    let filter_excludes = excludes.clone();
-    builder.filter_entry(move |entry| {
-        let relative = entry
-            .path()
-            .strip_prefix(&filter_root)
-            .unwrap_or(entry.path());
-        if entry
-            .file_type()
-            .is_some_and(|file_type| file_type.is_dir())
-        {
-            !filter_excludes.matches_dir(relative)
-        } else {
-            !filter_excludes.matches(relative)
-        }
-    });
+/// Directories are walked as the whole tree would be. A file given
+/// directly is checked even if `.gitignore` would hide it from a walk, but
+/// never if it matches `exclude` or is in no language ubiqlint knows; it is
+/// then skipped with a warning.
+fn select_files(reporter: &mut Reporter, project: &Project, paths: &[PathBuf]) -> Vec<PathBuf> {
+    let mut scopes = Vec::new();
     let mut files = Vec::new();
-    for entry in builder.build() {
-        if reporter.broken() {
-            break;
-        }
-        let entry = match entry {
-            Ok(entry) => entry,
-            Err(error) => {
-                if let Some(path) = error_path(&error) {
-                    let relative = path.strip_prefix(read_root).unwrap_or(path);
-                    if excludes.matches(relative) {
-                        continue;
-                    }
-                    // A directory that cannot be read may hide violations;
-                    // a file that no adapter handles is not ours to check.
-                    if !path.is_dir() && adapter_for(path).is_none() {
-                        continue;
-                    }
-                    reporter.problem(&format!(
-                        "{}: error: cannot walk: {}",
-                        root.join(relative).display(),
-                        walk_error_message(&error)
-                    ));
-                } else {
-                    reporter.problem(&format!(
-                        "{}: error: cannot walk: {}",
-                        read_root.display(),
-                        walk_error_message(&error)
-                    ));
-                }
-                continue;
-            }
+    for path in paths {
+        let Some(relative) = project.relative(path) else {
+            reporter.problem(&format!(
+                "{}: error: not under the configuration directory `{}`",
+                path.display(),
+                project.read_root().display()
+            ));
+            continue;
         };
-        if !entry.path().is_file() {
+        if project.read_root().join(&relative).is_dir() {
+            scopes.push(relative);
             continue;
         }
-        let relative = entry.path().strip_prefix(read_root).unwrap_or(entry.path());
-        files.push(relative.to_path_buf());
+        let reason = match project.skip(&relative) {
+            None => {
+                files.push(relative);
+                continue;
+            }
+            Some(Skip::Excluded) => "it matches `exclude` in the configuration",
+            Some(Skip::UnsupportedLanguage) => "ubiqlint cannot check this kind of file",
+        };
+        reporter.warn(&format!(
+            "{}: warning: not checked: {reason}",
+            project.root().join(&relative).display()
+        ));
+    }
+    if paths.is_empty() || !scopes.is_empty() {
+        let walk = project.walk(&scopes);
+        for error in &walk.errors {
+            let path = match &error.path {
+                Some(relative) => project.root().join(relative),
+                None => project.read_root().to_path_buf(),
+            };
+            reporter.problem(&format!(
+                "{}: error: cannot walk: {}",
+                path.display(),
+                error.message
+            ));
+        }
+        if paths.is_empty() {
+            // The walk is already sorted and has no duplicates.
+            return walk.files;
+        }
+        files.extend(walk.files);
     }
     files.sort();
+    files.dedup();
     files
-}
-
-/// Returns the core message of a walk error, without the path wrappers:
-/// walkdir wraps its own error in an `io::Error` whose text repeats the
-/// path ("IO error for operation on ..."), so unwrap to the raw OS error.
-fn walk_error_message(error: &ignore::Error) -> String {
-    match error {
-        ignore::Error::Io(io) => io
-            .get_ref()
-            .and_then(|inner| inner.source())
-            .map_or_else(|| io.to_string(), ToString::to_string),
-        ignore::Error::WithPath { err, .. }
-        | ignore::Error::WithLineNumber { err, .. }
-        | ignore::Error::WithDepth { err, .. } => walk_error_message(err),
-        ignore::Error::Partial(errors) => errors
-            .first()
-            .map_or_else(|| error.to_string(), walk_error_message),
-        other => other.to_string(),
-    }
-}
-
-/// Returns the path an `ignore::Error` is about, if it has one.
-fn error_path(error: &ignore::Error) -> Option<&Path> {
-    match error {
-        ignore::Error::WithPath { path, .. } => Some(path),
-        ignore::Error::Loop { child, .. } => Some(child),
-        ignore::Error::Partial(errors) => errors.iter().find_map(error_path),
-        ignore::Error::WithLineNumber { err, .. } | ignore::Error::WithDepth { err, .. } => {
-            error_path(err)
-        }
-        _ => None,
-    }
 }
 
 /// Reads `path` and parses it, reporting every problem through `reporter`.
@@ -900,28 +743,16 @@ fn load<T>(
     path: &Path,
     parse: fn(&str) -> Result<T, Vec<Diagnostic>>,
 ) -> Option<T> {
-    let source = read_file(reporter, path)?;
-    match parse(&source) {
-        Ok(value) => Some(value),
-        Err(diagnostics) => {
-            reporter.diagnostics(path, &diagnostics);
-            None
-        }
-    }
+    ubiqlint_project::load(path, parse)
+        .map_err(|error| reporter.load_error(path, &error))
+        .ok()
 }
 
 /// Reads input files using the same error format for definitions and source code.
 fn read_file(reporter: &mut Reporter, path: &Path) -> Option<String> {
-    match fs::read_to_string(path) {
-        Ok(source) => Some(source),
-        Err(error) => {
-            reporter.problem(&format!(
-                "{}: error: cannot read the file: {error}",
-                path.display()
-            ));
-            None
-        }
-    }
+    fs::read_to_string(path)
+        .map_err(|error| reporter.read_error(path, &error))
+        .ok()
 }
 
 /// Escapes control characters other than tabs, so that each problem stays on
@@ -936,52 +767,4 @@ fn single_line(text: &str) -> String {
         }
     }
     line
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// A file already at the temporary path is neither written through
-    /// (it may be a symlink to an unrelated file) nor removed, and the
-    /// dictionary stays as it was.
-    #[test]
-    fn replace_file_leaves_an_existing_temporary_path_alone() {
-        let directory =
-            std::env::temp_dir().join(format!("ubiqlint-replace-file-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&directory);
-        fs::create_dir_all(&directory).unwrap();
-        let dictionary = directory.join("terms.yaml");
-        fs::write(&dictionary, "old").unwrap();
-        let temporary = temporary_path(&fs::canonicalize(&dictionary).unwrap()).unwrap();
-
-        fs::write(&temporary, "someone else's").unwrap();
-        assert!(replace_file(&dictionary, "new").is_err());
-        assert_eq!(fs::read_to_string(&temporary).unwrap(), "someone else's");
-        assert_eq!(fs::read_to_string(&dictionary).unwrap(), "old");
-
-        #[cfg(unix)]
-        {
-            let unrelated = directory.join("unrelated.txt");
-            fs::write(&unrelated, "unrelated").unwrap();
-            fs::remove_file(&temporary).unwrap();
-            std::os::unix::fs::symlink(&unrelated, &temporary).unwrap();
-            assert!(replace_file(&dictionary, "new").is_err());
-            assert_eq!(fs::read_to_string(&unrelated).unwrap(), "unrelated");
-            assert!(
-                fs::symlink_metadata(&temporary)
-                    .unwrap()
-                    .file_type()
-                    .is_symlink()
-            );
-            assert!(
-                fs::symlink_metadata(&dictionary)
-                    .unwrap()
-                    .file_type()
-                    .is_file()
-            );
-            assert_eq!(fs::read_to_string(&dictionary).unwrap(), "old");
-        }
-        fs::remove_dir_all(&directory).unwrap();
-    }
 }

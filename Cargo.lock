@@ -513,9 +513,8 @@ name = "ubiqlint-cli"
 version = "0.1.0"
 dependencies = [
  "clap",
- "ignore",
  "ubiqlint-core",
- "ubiqlint-java",
+ "ubiqlint-project",
 ]
 
 [[package]]
@@ -533,6 +532,15 @@ dependencies = [
  "tree-sitter",
  "tree-sitter-java",
  "ubiqlint-core",
+]
+
+[[package]]
+name = "ubiqlint-project"
+version = "0.1.0"
+dependencies = [
+ "ignore",
+ "ubiqlint-core",
+ "ubiqlint-java",
 ]
 
 [[package]]
