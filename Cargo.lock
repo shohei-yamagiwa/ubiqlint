@@ -1321,6 +1321,7 @@ version = "0.1.0"
 dependencies = [
  "lsp-server",
  "lsp-types",
+ "percent-encoding",
  "serde",
  "serde_json",
  "ubiqlint-core",

@@ -188,7 +188,13 @@ impl TempProject {
     }
 
     fn uri(&self, path: &str) -> String {
-        url::Url::from_file_path(self.0.join(path)).unwrap().into()
+        // WHATWG URLs permit raw brackets in paths; LSP's RFC 3986 URI
+        // parser requires them to be escaped.
+        url::Url::from_file_path(self.0.join(path))
+            .unwrap()
+            .as_str()
+            .replace('[', "%5B")
+            .replace(']', "%5D")
     }
 
     fn server(&self) -> Server {
@@ -436,6 +442,12 @@ fn registers_definition_watchers_and_rechecks_external_edits_and_deletions() {
         registration["params"]["registrations"][0]["method"],
         "workspace/didChangeWatchedFiles"
     );
+    assert_eq!(
+        registration["params"]["registrations"][0]["registerOptions"]["watchers"],
+        json!([
+            {"globPattern":"**/terms.yaml"}, {"globPattern":"**/ubiqlint.yaml"}
+        ])
+    );
     server.send(json!({"jsonrpc":"2.0", "id":registration["id"], "result":null}));
     let uri = project.uri("src/Order.java");
     server.open(&uri, "class Order {}");
@@ -516,4 +528,179 @@ fn exits_with_failure_when_the_client_skips_shutdown() {
     server.notify("exit", Value::Null);
     drop(server.input.take());
     assert!(!server.child.wait().unwrap().success());
+}
+
+#[test]
+fn accepts_no_op_and_multiple_full_changes_but_rejects_fragments_atomically() {
+    let project = TempProject::new();
+    let mut server = project.server();
+    let uri = project.uri("src/Order.java");
+    server.open(&uri, "class Purchase {}");
+    assert_eq!(server.diagnostics(&uri)["diagnostics"][0]["code"], "types");
+    server.notify(
+        "textDocument/didChange",
+        json!({
+            "textDocument":{"uri":uri,"version":2}, "contentChanges":[]
+        }),
+    );
+    let unchanged = server.diagnostics(&uri);
+    assert_eq!(unchanged["version"], 2);
+    assert_eq!(unchanged["diagnostics"][0]["code"], "types");
+    server.change(&uri, 2, "class Order {}");
+    assert_eq!(
+        server.request("barrier", json!({}))["error"]["code"],
+        -32601
+    );
+    server.notify(
+        "textDocument/didChange",
+        json!({
+            "textDocument":{"uri":uri,"version":3},
+            "contentChanges":[{"text":"class Purchase {}"},{"text":"class Order {}"}]
+        }),
+    );
+    assert_eq!(server.diagnostics(&uri)["diagnostics"], json!([]));
+    server.notify(
+        "textDocument/didChange",
+        json!({
+            "textDocument":{"uri":uri,"version":4},
+            "contentChanges":[{"text":"class Purchase {}"},{
+                "range":{"start":{"line":0,"character":0},"end":{"line":0,"character":0}},
+                "text":"fragment"
+            }]
+        }),
+    );
+    assert_eq!(
+        server.request("barrier", json!({}))["error"]["code"],
+        -32601
+    );
+    // Rejection must not consume version 4 or change the buffer.
+    server.notify("textDocument/didSave", json!({"textDocument":{"uri":uri}}));
+    let unchanged = server.diagnostics(&uri);
+    assert_eq!(unchanged["version"], 3);
+    assert_eq!(unchanged["diagnostics"], json!([]));
+    server.change(&uri, 4, "class Purchase {}");
+    assert_eq!(server.diagnostics(&uri)["diagnostics"][0]["code"], "types");
+    server.shutdown();
+}
+
+#[test]
+fn keeps_yaml_and_unsupported_buffers_quiet_when_definitions_are_broken() {
+    let project = TempProject::new();
+    project.write("ubiqlint.yaml", "rules: wrong\n");
+    project.write("terms.yaml", "terms: wrong\n");
+    let mut server = project.server();
+    for path in ["src/notes.txt", "ubiqlint.yaml", "terms.yaml"] {
+        let uri = project.uri(path);
+        server.open(&uri, "not valid YAML or Java");
+        assert_eq!(server.diagnostics(&uri)["diagnostics"], json!([]));
+    }
+    let uri = project.uri("src/Order.java");
+    server.open(&uri, "class Order {}");
+    assert!(
+        server.diagnostics(&uri)["diagnostics"][0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("ubiqlint.yaml:1:")
+    );
+    server.shutdown();
+}
+
+#[test]
+fn ignores_unselected_nested_configs_but_observes_the_selected_config() {
+    let project = TempProject::new();
+    project.write("lint.yaml", CONFIG);
+    let mut server = Server::start(Some(&project.0.join("lint.yaml")));
+    server.initialize(&project, json!(["utf-16"]));
+    let uri = project.uri("src/Order.java");
+    server.open(&uri, "class Order {}");
+    assert_eq!(server.diagnostics(&uri)["diagnostics"], json!([]));
+    project.write("src/ubiqlint.yaml", "rules: []\n");
+    project.write("src/lint.yaml", "rules: []\n");
+    project.write("terms.yaml", "context: order\nterms: []\n");
+    for path in ["src/ubiqlint.yaml", "src/lint.yaml", "ubiqlint.yaml"] {
+        server.notify(
+            "textDocument/didSave",
+            json!({"textDocument":{"uri":project.uri(path)}}),
+        );
+        server.notify(
+            "workspace/didChangeWatchedFiles",
+            json!({"changes":[{"uri":project.uri(path),"type":2}]}),
+        );
+    }
+    assert_eq!(
+        server.request("barrier", json!({}))["error"]["code"],
+        -32601
+    );
+    server.notify(
+        "textDocument/didSave",
+        json!({"textDocument":{"uri":project.uri("lint.yaml")}}),
+    );
+    assert_eq!(server.diagnostics(&uri)["diagnostics"][0]["code"], "types");
+    server.shutdown();
+}
+
+#[test]
+fn source_saves_reload_same_size_definitions_even_with_the_same_mtime() {
+    let project = TempProject::new();
+    let mut server = project.server();
+    let uri = project.uri("src/Order.java");
+    server.open(&uri, "class Order {}");
+    assert_eq!(server.diagnostics(&uri)["diagnostics"], json!([]));
+    let path = project.0.join("terms.yaml");
+    let before = fs::metadata(&path).unwrap();
+    let replacement = TERMS.replace("Order", "Other").replace("order", "other");
+    assert_eq!(replacement.len(), TERMS.len());
+    project.write("terms.yaml", &replacement);
+    fs::File::options()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_times(fs::FileTimes::new().set_modified(before.modified().unwrap()))
+        .unwrap();
+    assert_eq!(
+        fs::metadata(&path).unwrap().modified().unwrap(),
+        before.modified().unwrap()
+    );
+    server.notify("textDocument/didSave", json!({"textDocument":{"uri":uri}}));
+    assert_eq!(server.diagnostics(&uri)["diagnostics"][0]["code"], "types");
+    server.shutdown();
+}
+
+#[test]
+fn registers_relative_watchers_for_supported_clients_and_custom_config_names() {
+    let project = TempProject::new();
+    for (name, pattern) in [("lint.yaml", "lint.yaml"), ("lint [active].yaml", "*")] {
+        project.write(name, CONFIG);
+        let mut server = Server::start(Some(&project.0.join(name)));
+        server.request(
+            "initialize",
+            json!({
+                "rootUri":project.uri(""), "capabilities":{"workspace":{"didChangeWatchedFiles":{
+                    "dynamicRegistration":true, "relativePatternSupport":true
+                }}}
+            }),
+        );
+        server.notify("initialized", json!({}));
+        let registration = server.receive();
+        assert_eq!(registration["method"], "client/registerCapability");
+        let base = url::Url::from_directory_path(&project.0).unwrap();
+        assert_eq!(
+            registration["params"]["registrations"][0]["registerOptions"]["watchers"],
+            json!([
+                {"globPattern":{"baseUri":base.as_str(), "pattern":"**/terms.yaml"}},
+                {"globPattern":{"baseUri":base.as_str(), "pattern":pattern}}
+            ])
+        );
+        server.send(json!({"jsonrpc":"2.0", "id":registration["id"], "result":null}));
+        let uri = project.uri("src/Order.java");
+        server.open(&uri, "class Order {}");
+        assert_eq!(server.diagnostics(&uri)["diagnostics"], json!([]));
+        project.write(name, "rules: []\n");
+        server.notify(
+            "workspace/didChangeWatchedFiles",
+            json!({"changes":[{"uri":project.uri(name),"type":2}]}),
+        );
+        assert_eq!(server.diagnostics(&uri)["diagnostics"], json!([]));
+        server.shutdown();
+    }
 }

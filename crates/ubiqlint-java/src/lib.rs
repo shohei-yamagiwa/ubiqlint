@@ -57,13 +57,11 @@ pub fn extract(source: &str) -> Result<SourceFile, Vec<Diagnostic>> {
     let translated = Translated::new(source).map_err(|malformed| {
         malformed
             .iter()
-            .map(|escape| Diagnostic {
-                location: lines.location(escape.offset),
-                message:
-                    "invalid Unicode escape: `\\u` must be followed by four hexadecimal digits"
-                        .to_owned(),
-                span: None,
-                rule_id: None,
+            .map(|escape| {
+                Diagnostic::new(
+                    lines.location(escape.offset),
+                    "invalid Unicode escape: `\\u` must be followed by four hexadecimal digits",
+                )
             })
             .collect::<Vec<_>>()
     })?;

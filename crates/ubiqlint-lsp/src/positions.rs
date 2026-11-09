@@ -12,18 +12,22 @@ impl<'a> Positions<'a> {
     pub(crate) fn new(text: &'a str, encoding: &PositionEncodingKind) -> Self {
         // str::lines does not treat a lone CR as a line ending. Both Java
         // and LSP do, and a CRLF is one line ending, not two.
+        // Keep this consistent with ubiqlint_core::LineIndex's line endings.
         let mut lines = Vec::new();
         let mut start = 0;
-        let mut chars = text.char_indices().peekable();
-        while let Some((offset, c)) = chars.next() {
-            if c == '\r' || c == '\n' {
+        let bytes = text.as_bytes();
+        let mut offset = 0;
+        // ASCII line terminators cannot occur inside a multibyte UTF-8 character.
+        while offset < bytes.len() {
+            let byte = bytes[offset];
+            if byte == b'\r' || byte == b'\n' {
                 lines.push(&text[start..offset]);
-                start = offset + 1;
-                if c == '\r' && chars.peek().is_some_and(|(_, c)| *c == '\n') {
-                    chars.next();
-                    start += 1;
+                if byte == b'\r' && bytes.get(offset + 1) == Some(&b'\n') {
+                    offset += 1;
                 }
+                start = offset + 1;
             }
+            offset += 1;
         }
         lines.push(&text[start..]);
         Self {
@@ -80,6 +84,30 @@ mod tests {
                 positions.position(Location { line: 4, column: 1 }),
                 Position::new(3, 0)
             );
+        }
+    }
+
+    #[test]
+    fn agrees_with_core_line_index_at_character_boundaries() {
+        for text in ["", "a\r\n", "\r\n\r\nb", "😀注文\rx\n\r\n終\n"] {
+            let core = ubiqlint_core::LineIndex::new(text);
+            let positions = Positions::new(text, &PositionEncodingKind::UTF32);
+            for offset in 0..=text.len() {
+                if !text.is_char_boundary(offset)
+                    || (offset > 0
+                        && text.as_bytes().get(offset) == Some(&b'\n')
+                        && text.as_bytes()[offset - 1] == b'\r')
+                {
+                    // LSP has no position between the CR and LF of a CRLF.
+                    continue;
+                }
+                let location = core.location(offset);
+                assert_eq!(
+                    positions.position(location),
+                    Position::new((location.line - 1) as u32, (location.column - 1) as u32),
+                    "{text:?} at {offset}"
+                );
+            }
         }
     }
 }

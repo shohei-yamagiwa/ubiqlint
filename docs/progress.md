@@ -134,4 +134,7 @@
 - `plugins/ubiqlint` に Claude Code のプラグイン、`.claude-plugin/marketplace.json` にインストール用の定義を追加しました。`.lsp.json` から `ubiqlint lsp` を起動します。バイナリのインストールは別途必要です。プラグインと marketplace の定義は Claude Code の `plugin validate` で確認しています
 - 着手前の試験では、公式の Claude Code 2.1.319 の配布物から取り出した LSP 管理処理に、同じ `.java` の 2 サーバを登録しました。生成するサーバを通知記録用のスタブに差し替えると、先頭の jdtls にだけ open・change が届き、2 番目の ubiqlint は使わないという警告が出ました。認証済み Claude Code と jdtls を起動する試験は未実施です。併用を前提にせず、ほかの Java LSP を無効にする方法と、jdtls を残して MCP・hooks を使う方法を文書に記載しました
 - LSP の統合テストは実行ファイルを子プロセスとして起動し、Content-Length 付きの JSON-RPC を送ります。未保存の変更、診断の解消と close、UTF-16/UTF-32 とエスケープの範囲、import と構文エラー、最寄りの辞書、除外、設定・辞書の保存と監視、壊れた定義からの回復、終了手順を検証します
-- `cargo fmt --all --check`、`cargo clippy --workspace --all-targets --locked -- -D warnings`、`cargo test --workspace --locked`（全 286 件）が通りました。最低対応版の Rust 1.88.0 でも `cargo check --workspace --locked` が通っています
+- レビュー後、空の変更通知と複数の全文置換に対応し、範囲付きの差分は内容・版とも変更せず拒否するようにしました。通知ごとの処理を分離し、`Session::check` の補助マップと `unreachable!`、重複する定義判定・エラー整形、違反のないバッファの位置索引作成を取り除きました
+- 監視パターンは、対応クライアントでは設定ディレクトリを基準にする `RelativePattern`、非対応ではファイル名の glob を使います。入れ子の未使用の設定ファイルは再検査を起こさず、YAML 自身には診断を出さないことも文書とテストに明記しました。URI 変換を分離し、パス中の角括弧なども RFC 3986 に沿って変換します
+- 定義キャッシュと編集通知の集約は導入していません。同じ更新時刻・サイズでも辞書の変更を読み直す回帰テストを追加し、現時点ではディスクの最新状態と通知順序を優先しています
+- `cargo fmt --all --check`、`cargo clippy --workspace --all-targets --locked -- -D warnings`、`cargo test --workspace --locked`（全 293 件、LSP 統合テスト 16 件を含む）が通りました。最低対応版の Rust 1.88.0 でも `cargo check --workspace --locked` が通っています

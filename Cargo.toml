@@ -23,6 +23,7 @@ globset = "0.4"
 ignore = "0.4"
 lsp-server = "0.7"
 lsp-types = "0.97"
+percent-encoding = "2"
 rmcp = { version = "3.9", features = ["transport-io"] }
 saphyr = "0.3.3"
 schemars = "1"

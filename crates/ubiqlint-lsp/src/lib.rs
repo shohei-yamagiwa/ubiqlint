@@ -4,8 +4,11 @@
 //! come from disk and are reloaded for each check, sharing the same
 //! project layer as the command line and MCP server.
 
+mod notifications;
 mod positions;
 mod session;
+mod uri;
+mod watchers;
 
 use std::error::Error;
 use std::path::{Path, PathBuf};
@@ -13,11 +16,14 @@ use std::path::{Path, PathBuf};
 use lsp_server::{Connection, ErrorCode, Message, Notification, Request, Response};
 use lsp_types::notification::{Notification as _, PublishDiagnostics};
 use lsp_types::*;
-use serde::de::DeserializeOwned;
-use serde_json::json;
 use ubiqlint_core::CONFIG_FILE_NAME;
 
-use session::{Document, Session};
+use session::Session;
+use uri::file_path;
+
+// The only server-to-client request is this one-time registration. A stable
+// string id keeps it distinct from numeric ids if other requests are added.
+const DEFINITION_WATCH_REQUEST: &str = "ubiqlint-watch-definitions";
 
 type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
 
@@ -71,24 +77,24 @@ fn serve(connection: &Connection, config: Option<&Path>) -> Result<()> {
             }),
         })?,
     )?;
-    if params
+    if let Some(watched) = params
         .capabilities
         .workspace
         .as_ref()
         .and_then(|workspace| workspace.did_change_watched_files.as_ref())
-        .is_some_and(|watched| watched.dynamic_registration == Some(true))
+        .filter(|watched| watched.dynamic_registration == Some(true))
     {
         connection.sender.send(Message::Request(Request::new(
-            1.into(),
+            DEFINITION_WATCH_REQUEST.to_owned().into(),
             "client/registerCapability".to_owned(),
             RegistrationParams {
                 registrations: vec![Registration {
                     id: "ubiqlint-definitions".to_owned(),
                     method: "workspace/didChangeWatchedFiles".to_owned(),
-                    register_options: Some(json!({ "watchers": [
-                    { "globPattern": "**/terms.yaml" },
-                    { "globPattern": config.to_string_lossy().replace('\\', "/") }
-                ] })),
+                    register_options: Some(serde_json::to_value(watchers::options(
+                        &config,
+                        watched.relative_pattern_support == Some(true),
+                    )?)?),
                 }],
             },
         )))?;
@@ -126,7 +132,7 @@ fn serve(connection: &Connection, config: Option<&Path>) -> Result<()> {
                 };
             }
             Message::Notification(notification) if !shutdown => {
-                if let Err(error) = notify(connection, &mut session, notification) {
+                if let Err(error) = notifications::handle(connection, &mut session, notification) {
                     // A malformed notification cannot be answered. Keep serving
                     // the other buffers instead of terminating the connection.
                     eprintln!("ubiqlint lsp: {error}");
@@ -143,85 +149,6 @@ fn serve(connection: &Connection, config: Option<&Path>) -> Result<()> {
     Ok(())
 }
 
-fn notify(
-    connection: &Connection,
-    session: &mut Session,
-    notification: Notification,
-) -> Result<()> {
-    let mut only = None;
-    let check = match notification.method.as_str() {
-        "textDocument/didOpen" => {
-            let params: DidOpenTextDocumentParams = params(notification)?;
-            let document = params.text_document;
-            only = Some(document.uri.clone());
-            session.documents.insert(
-                document.uri.as_str().to_owned(),
-                Document {
-                    uri: document.uri,
-                    text: document.text,
-                    version: document.version,
-                },
-            );
-            true
-        }
-        "textDocument/didChange" => {
-            let params: DidChangeTextDocumentParams = params(notification)?;
-            let Some(document) = session.documents.get_mut(params.text_document.uri.as_str())
-            else {
-                return Ok(());
-            };
-            if params.text_document.version <= document.version {
-                return Ok(());
-            }
-            let mut changes = params.content_changes;
-            if changes.len() != 1 || changes[0].range.is_some() {
-                return Err("expected one full-document content change".into());
-            }
-            document.text = changes.remove(0).text;
-            document.version = params.text_document.version;
-            only = Some(params.text_document.uri);
-            true
-        }
-        "textDocument/didClose" => {
-            let params: DidCloseTextDocumentParams = params(notification)?;
-            session.documents.remove(params.text_document.uri.as_str());
-            publish(
-                connection,
-                PublishDiagnosticsParams::new(params.text_document.uri, Vec::new(), None),
-            )?;
-            false
-        }
-        "textDocument/didSave" => {
-            let params: DidSaveTextDocumentParams = params(notification)?;
-            if !session.is_definition(&params.text_document.uri) {
-                only = Some(params.text_document.uri.clone());
-            }
-            session.is_definition(&params.text_document.uri)
-                || session
-                    .documents
-                    .contains_key(params.text_document.uri.as_str())
-        }
-        "workspace/didChangeWatchedFiles" => {
-            let params: DidChangeWatchedFilesParams = params(notification)?;
-            params
-                .changes
-                .iter()
-                .any(|change| session.is_definition(&change.uri))
-        }
-        _ => false,
-    };
-    if check {
-        for params in session.check(only.as_ref()) {
-            publish(connection, params)?;
-        }
-    }
-    Ok(())
-}
-
-fn params<T: DeserializeOwned>(notification: Notification) -> Result<T> {
-    Ok(serde_json::from_value(notification.params)?)
-}
-
 fn publish(connection: &Connection, params: PublishDiagnosticsParams) -> Result<()> {
     connection
         .sender
@@ -230,10 +157,6 @@ fn publish(connection: &Connection, params: PublishDiagnosticsParams) -> Result<
             params,
         )))?;
     Ok(())
-}
-
-pub(crate) fn file_path(uri: &Uri) -> Option<PathBuf> {
-    url::Url::parse(uri.as_str()).ok()?.to_file_path().ok()
 }
 
 #[allow(deprecated)] // root_uri/root_path remain in clients without workspaceFolders.
@@ -260,6 +183,7 @@ fn config_path(explicit: Option<&Path>, params: &InitializeParams) -> Result<Pat
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn selects_the_config_in_explicit_workspace_or_legacy_root_order() {
