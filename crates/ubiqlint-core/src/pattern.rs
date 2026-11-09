@@ -1,5 +1,7 @@
 //! Naming patterns such as `{verb}{noun}` or `{noun}{verb:pp}Event`.
 
+use crate::identifier;
+
 /// A parsed naming pattern.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Pattern {
@@ -18,9 +20,10 @@ pub enum Element {
     Vocabulary(String),
     /// `{any}`: any sequence of words.
     Any,
-    /// Literal text such as `get` or `Event`, compared case-insensitively
-    /// word by word.
-    Literal(String),
+    /// The words of literal text such as `get` or `Event`, split by the same
+    /// rules as identifiers. Like identifiers, they are lowercase, so the
+    /// text matches regardless of case.
+    Literal(Vec<String>),
 }
 
 /// A form of a noun.
@@ -90,9 +93,19 @@ impl Pattern {
                          text outside placeholders may contain only ASCII letters, digits and `_`"
                     ));
                 }
-                elements.push(Element::Literal(literal.to_owned()));
+                // Separators such as `_` are ignored, as in identifiers, so
+                // text made only of them adds nothing.
+                let words = identifier::split(literal);
+                if !words.is_empty() {
+                    elements.push(Element::Literal(words));
+                }
                 rest = &rest[end..];
             }
+        }
+        if elements.is_empty() {
+            return Err(format!(
+                "pattern `{source}` contains no placeholder or word"
+            ));
         }
         Ok(Self {
             source: source.to_owned(),
@@ -164,8 +177,8 @@ mod tests {
         Pattern::parse(source, |name| name == "role").map(|pattern| pattern.elements)
     }
 
-    fn literal(text: &str) -> Element {
-        Element::Literal(text.to_owned())
+    fn literal(words: &[&str]) -> Element {
+        Element::Literal(words.iter().map(|word| word.to_string()).collect())
     }
 
     #[test]
@@ -182,7 +195,7 @@ mod tests {
             Ok(vec![
                 Noun(NounForm::Singular),
                 Verb(VerbForm::Pp),
-                literal("Event")
+                literal(&["event"])
             ])
         );
         assert_eq!(
@@ -192,10 +205,27 @@ mod tests {
                 Vocabulary("role".to_owned())
             ])
         );
-        assert_eq!(parse("get{any}"), Ok(vec![literal("get"), Any]));
+        assert_eq!(parse("get{any}"), Ok(vec![literal(&["get"]), Any]));
         assert_eq!(
             parse("MAX_{noun:plural}"),
-            Ok(vec![literal("MAX_"), Noun(NounForm::Plural)])
+            Ok(vec![literal(&["max"]), Noun(NounForm::Plural)])
+        );
+    }
+
+    #[test]
+    fn splits_literals_like_identifiers() {
+        use Element::*;
+        assert_eq!(
+            parse("findAll{noun:plural}"),
+            Ok(vec![literal(&["find", "all"]), Noun(NounForm::Plural)])
+        );
+        assert_eq!(
+            parse("{noun}_{verb:pp}"),
+            Ok(vec![Noun(NounForm::Singular), Verb(VerbForm::Pp)])
+        );
+        assert_eq!(
+            parse("_"),
+            Err("pattern `_` contains no placeholder or word".to_owned())
         );
     }
 

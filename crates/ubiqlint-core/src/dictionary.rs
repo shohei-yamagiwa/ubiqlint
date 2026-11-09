@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 
 use crate::diagnostic::{Diagnostic, Location};
+use crate::identifier;
 use crate::words::Words;
 use crate::yaml::{self, Diagnostics, Fields, Node};
 
@@ -186,6 +187,19 @@ fn read_term(diags: &mut Diagnostics, node: &Node, seen: &mut Seen) -> Option<Te
     });
     let forms = fields.required(diags, "forms").and_then(|node| {
         let (singular, plural) = read_noun_forms(diags, node)?;
+        if let (Some(name), Some((singular, location))) = (name, &singular) {
+            let words = identifier::split(name);
+            if singular.as_slice() != words.as_slice() {
+                diags.error(
+                    *location,
+                    format!(
+                        "`singular` (`{singular}`) must be the words of `name` \
+                         (`{name}` splits into `{}`)",
+                        words.join(" ")
+                    ),
+                );
+            }
+        }
         if is_new_name {
             seen.add_forms(diags, name, [singular.as_ref(), plural.as_ref()]);
         }
@@ -498,16 +512,37 @@ terms:
       - verb: place
         forms: { base: place, s: places, past: placed, pp: placed, ing: placing }
   - name: order
-    forms: { singular: purchase, plural: purchases }
+    forms: { singular: order, plural: orders }
   - name: Purchase
-    forms: { singular: purchase order, plural: orders }
+    forms: { singular: purchase, plural: orders }
 ";
         assert_eq!(
             errors(source),
             [
                 "8:15: duplicate behavior `place` (first defined at line 6)",
                 "10:11: duplicate term `order` (first defined at line 3)",
-                "13:48: the form `orders` is already used by term `Order` (line 4)",
+                "13:42: the form `orders` is already used by term `Order` (line 4)",
+            ]
+        );
+    }
+
+    #[test]
+    fn reports_a_singular_form_that_differs_from_the_name() {
+        let source = "\
+context: order
+terms:
+  - name: LineItem
+    forms: { singular: line items, plural: line items }
+  - name: SKU
+    forms: { singular: sku, plural: skus }
+  - name: ShippingAddress
+    forms: { singular: shipping address, plural: shipping addresses }
+";
+        assert_eq!(
+            errors(source),
+            [
+                "4:24: `singular` (`line items`) must be the words of `name` \
+              (`LineItem` splits into `line item`)"
             ]
         );
     }
