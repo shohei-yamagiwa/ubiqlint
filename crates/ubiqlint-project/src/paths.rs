@@ -12,10 +12,10 @@ use std::path::{Component, Path, PathBuf};
 /// paths compared, for a root reached through a symlink elsewhere (such as
 /// a temporary directory) and named differently in `path`.
 pub(crate) fn relative(root: &Path, path: &Path) -> Option<PathBuf> {
-    if let (Some(root), Some(path)) = (lexical(root), lexical(path)) {
-        if let Ok(relative) = path.strip_prefix(&root) {
-            return Some(relative.to_owned());
-        }
+    if let (Some(root), Some(path)) = (lexical(root), lexical(path))
+        && let Ok(relative) = path.strip_prefix(&root)
+    {
+        return Some(relative.to_owned());
     }
     let root = fs::canonicalize(root).ok()?;
     let path = canonical(path)?;

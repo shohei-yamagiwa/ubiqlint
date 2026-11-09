@@ -133,12 +133,11 @@ fn unicode_escape(text: &str) -> Escape {
 /// surrogate escape right after it. A surrogate without its pair, which Java
 /// allows only in literals and comments, becomes U+FFFD.
 fn combine_surrogates(unit: u16, length: usize, rest: &str) -> (char, usize) {
-    if (0xD800..0xDC00).contains(&unit) {
-        if let Escape::Unit(low, low_length) = unicode_escape(rest) {
-            if let Some(Ok(c)) = char::decode_utf16([unit, low]).next() {
-                return (c, length + low_length);
-            }
-        }
+    if (0xD800..0xDC00).contains(&unit)
+        && let Escape::Unit(low, low_length) = unicode_escape(rest)
+        && let Some(Ok(c)) = char::decode_utf16([unit, low]).next()
+    {
+        return (c, length + low_length);
     }
     let c = char::decode_utf16([unit])
         .next()

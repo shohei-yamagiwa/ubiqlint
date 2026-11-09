@@ -46,10 +46,10 @@ impl Excludes {
         // so skip them here.
         let mut dir_builder = GlobSetBuilder::new();
         for glob in globs {
-            if let Some(prefix) = glob.strip_suffix("/**") {
-                if let Ok(glob) = GlobBuilder::new(prefix).literal_separator(true).build() {
-                    dir_builder.add(glob);
-                }
+            if let Some(prefix) = glob.strip_suffix("/**")
+                && let Ok(glob) = GlobBuilder::new(prefix).literal_separator(true).build()
+            {
+                dir_builder.add(glob);
             }
         }
         Self {
