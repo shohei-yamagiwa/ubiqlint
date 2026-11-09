@@ -61,25 +61,28 @@ pub fn extract(source: &str) -> Result<Symbols, Vec<Diagnostic>> {
     Ok(extractor.symbols)
 }
 
-/// Reports each error and missing token in the tree.
+/// Reports each missing token and each innermost error in the tree.
+///
+/// An error that contains other errors is not reported itself. When
+/// tree-sitter cannot recover, it may wrap everything from the start of the
+/// file in one error, and reporting that would hide where the problem is.
 fn syntax_errors(root: Node, lines: &LineIndex) -> Vec<Diagnostic> {
     let mut errors = Vec::new();
     let mut stack = vec![root];
     while let Some(node) = stack.pop() {
-        let message = if node.is_error() {
-            "syntax error".to_owned()
-        } else if node.is_missing() {
+        // Missing tokens such as `;` are anonymous, so look at every child.
+        let mut cursor = node.walk();
+        let nested: Vec<Node> = node.children(&mut cursor).filter(Node::has_error).collect();
+        let message = if node.is_missing() {
             if node.is_named() {
                 format!("syntax error: missing {}", node.kind().replace('_', " "))
             } else {
                 format!("syntax error: missing `{}`", node.kind())
             }
+        } else if node.is_error() && nested.is_empty() {
+            "syntax error".to_owned()
         } else {
-            // Only descend into nodes that contain errors. Missing tokens
-            // such as `;` are anonymous, so look at every child.
-            let mut cursor = node.walk();
-            let children: Vec<Node> = node.children(&mut cursor).collect();
-            stack.extend(children.into_iter().rev().filter(Node::has_error));
+            stack.extend(nested.into_iter().rev());
             continue;
         };
         errors.push(Diagnostic {

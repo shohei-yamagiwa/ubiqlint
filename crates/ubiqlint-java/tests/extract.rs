@@ -558,7 +558,9 @@ fn links_children_to_parents() {
 
 #[test]
 fn handles_deeply_nested_expressions() {
-    let terms = vec!["1"; 50_000].join(" + ");
+    // A recursive walk overflows a 2 MiB test thread at about 5,000 terms
+    // in a debug build and 20,000 in a release build.
+    let terms = vec!["1"; 20_000].join(" + ");
     let source = format!("class Order {{ int total = {terms}; }}");
     assert_eq!(outline(&source), lines("type Order\n  field total"));
 }
@@ -576,6 +578,15 @@ fn reports_syntax_errors_instead_of_symbols() {
             "5:17: syntax error: missing `)`"
         ]
     );
+}
+
+#[test]
+fn reports_errors_inside_larger_errors() {
+    // tree-sitter wraps this whole file in an error that starts at 1:1, and
+    // the actual problem, the `;` at 1:35, in another error inside it.
+    let errors = extract("class A { void f() { int x = (1 + ; foo(; } }").unwrap_err();
+    let errors: Vec<String> = errors.iter().map(ToString::to_string).collect();
+    assert_eq!(errors, ["1:35: syntax error"]);
 }
 
 #[test]
