@@ -34,12 +34,13 @@ pub struct Vocabulary {
 #[derive(Clone, Debug)]
 pub struct Rule {
     pub id: String,
-    /// Glob patterns for the files the rule applies to, as written.
-    pub include: Vec<String>,
     pub target: Target,
     /// The identifier must match at least one of these.
     pub patterns: Vec<Pattern>,
     pub location: Location,
+    /// Kept private, together with its compiled form, so that the two
+    /// cannot get out of sync.
+    include_globs: Vec<String>,
     include_set: GlobSet,
 }
 
@@ -85,6 +86,12 @@ impl Config {
 }
 
 impl Rule {
+    /// Returns the glob patterns for the files the rule applies to, as
+    /// written in `include`.
+    pub fn include_globs(&self) -> &[String] {
+        &self.include_globs
+    }
+
     /// Tells whether the rule applies to `path`, given relative to the
     /// directory of the configuration file.
     pub fn includes(&self, path: &Path) -> bool {
@@ -205,13 +212,13 @@ fn read_rule(
                 .ok()
         }))
     });
-    let (include, include_set) = include?;
+    let (include_globs, include_set) = include?;
     Some(Rule {
         id: id?.to_owned(),
-        include,
         target: target?,
         patterns: patterns?,
         location: yaml::location(node),
+        include_globs,
         include_set,
     })
 }
@@ -359,7 +366,7 @@ rules:
 
         let rule = &config.rules[0];
         assert_eq!(rule.target, Target::Type);
-        assert_eq!(rule.include, ["src/main/java/**/domain/**"]);
+        assert_eq!(rule.include_globs(), ["src/main/java/**/domain/**"]);
         assert_eq!(rule.location, Location { line: 6, column: 5 });
         assert_eq!(
             rule.patterns[2].elements(),
