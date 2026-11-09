@@ -4,11 +4,13 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use clap::{Parser, Subcommand};
+use clap::{ArgGroup, Args, Parser, Subcommand};
 use ignore::WalkBuilder;
+use ubiqlint_core::dictionary::validate_term_name;
 use ubiqlint_core::{
-    CONFIG_FILE_NAME, Checker, Config, DICTIONARY_FILE_NAME, Diagnostic, Dictionary,
-    DictionaryResolver, Excludes, LanguageAdapter, ResolutionError,
+    BehaviorChanges, CONFIG_FILE_NAME, Checker, Config, DICTIONARY_FILE_NAME, Diagnostic,
+    Dictionary, DictionaryResolver, Edit, EditError, Excludes, FieldChange, LanguageAdapter,
+    NewTerm, Outcome, ResolutionError, TermChanges, VerbForms, Words,
 };
 use ubiqlint_java::JavaAdapter;
 
@@ -40,6 +42,184 @@ enum Command {
         #[arg(long)]
         dictionary: Option<PathBuf>,
     },
+    /// Add, edit or remove a term of a dictionary
+    #[command(subcommand)]
+    Term(TermCommand),
+    /// Add, edit or remove a behavior of a term
+    #[command(subcommand)]
+    Behavior(BehaviorCommand),
+}
+
+/// The dictionary an editing command changes.
+#[derive(Args)]
+struct DictionaryFile {
+    /// The dictionary to edit. It must exist and be valid; it is rewritten
+    /// only if the edited dictionary is valid
+    #[arg(long, value_name = "PATH", default_value = DICTIONARY_FILE_NAME)]
+    dictionary: PathBuf,
+}
+
+#[derive(Subcommand)]
+enum TermCommand {
+    /// Add a term, without behaviors, after the existing terms
+    Add {
+        /// The canonical spelling, such as `LineItem`. The singular form
+        /// is its words (`line item`)
+        #[arg(value_parser = parse_term_name)]
+        name: String,
+        /// The plural form, in lowercase words (e.g. `line items`)
+        #[arg(long, value_name = "WORDS", value_parser = parse_words)]
+        plural: Words,
+        /// The kind of term, such as `entity` or `value_object`
+        #[arg(long, value_name = "TEXT", value_parser = parse_text)]
+        kind: Option<String>,
+        /// A Japanese label, such as `注文`
+        #[arg(long, value_name = "TEXT", value_parser = parse_text)]
+        ja: Option<String>,
+        /// What the term means
+        #[arg(long, value_name = "TEXT", value_parser = parse_text)]
+        description: Option<String>,
+        #[command(flatten)]
+        file: DictionaryFile,
+    },
+    /// Change fields of a term. Give at least one change
+    #[command(
+        group(ArgGroup::new("changes").required(true).multiple(true)),
+        override_usage = "ubiqlint term edit [OPTIONS] <NAME>"
+    )]
+    Edit {
+        /// The name of the term to edit
+        name: String,
+        /// Rename the term. The singular form follows the new name; give
+        /// `--plural` too if the singular form changes
+        #[arg(
+            long = "name",
+            id = "new_name",
+            value_name = "NAME",
+            group = "changes",
+            value_parser = parse_term_name
+        )]
+        new_name: Option<String>,
+        /// The new plural form, in lowercase words
+        #[arg(long, value_name = "WORDS", group = "changes", value_parser = parse_words)]
+        plural: Option<Words>,
+        /// Set the kind of term
+        #[arg(long, value_name = "TEXT", group = "changes", value_parser = parse_text)]
+        kind: Option<String>,
+        /// Remove the kind of term
+        #[arg(long, group = "changes", conflicts_with = "kind")]
+        unset_kind: bool,
+        /// Set the Japanese label
+        #[arg(long, value_name = "TEXT", group = "changes", value_parser = parse_text)]
+        ja: Option<String>,
+        /// Remove the Japanese label
+        #[arg(long, group = "changes", conflicts_with = "ja")]
+        unset_ja: bool,
+        /// Set the description
+        #[arg(long, value_name = "TEXT", group = "changes", value_parser = parse_text)]
+        description: Option<String>,
+        /// Remove the description
+        #[arg(long, group = "changes", conflicts_with = "description")]
+        unset_description: bool,
+        #[command(flatten)]
+        file: DictionaryFile,
+    },
+    /// Remove a term, together with its behaviors
+    Remove {
+        /// The name of the term to remove
+        name: String,
+        #[command(flatten)]
+        file: DictionaryFile,
+    },
+}
+
+#[derive(Subcommand)]
+enum BehaviorCommand {
+    /// Add a behavior to a term, after its existing behaviors. Every form
+    /// of the verb is required, since ubiqlint never guesses inflections
+    Add {
+        /// The name of the term, such as `Order`
+        term: String,
+        /// The verb in its base form, in lowercase words (e.g. `place`)
+        #[arg(value_parser = parse_words)]
+        verb: Words,
+        /// The third-person singular present (e.g. `places`)
+        #[arg(long = "s", value_name = "WORDS", value_parser = parse_words)]
+        s: Words,
+        /// The past tense (e.g. `placed`)
+        #[arg(long, value_name = "WORDS", value_parser = parse_words)]
+        past: Words,
+        /// The past participle (e.g. `placed`)
+        #[arg(long, value_name = "WORDS", value_parser = parse_words)]
+        pp: Words,
+        /// The present participle (e.g. `placing`)
+        #[arg(long, value_name = "WORDS", value_parser = parse_words)]
+        ing: Words,
+        #[command(flatten)]
+        file: DictionaryFile,
+    },
+    /// Change a behavior of a term. Give at least one change
+    #[command(
+        group(ArgGroup::new("changes").required(true).multiple(true)),
+        override_usage = "ubiqlint behavior edit [OPTIONS] <TERM> <VERB>"
+    )]
+    Edit {
+        /// The name of the term
+        term: String,
+        /// The verb of the behavior to edit
+        #[arg(value_parser = parse_words)]
+        verb: Words,
+        /// Change the verb. The base form follows it; give `--s`, `--past`,
+        /// `--pp` and `--ing` too
+        #[arg(
+            long = "verb",
+            id = "new_verb",
+            value_name = "WORDS",
+            group = "changes",
+            value_parser = parse_words
+        )]
+        new_verb: Option<Words>,
+        /// The new third-person singular present
+        #[arg(long = "s", value_name = "WORDS", group = "changes", value_parser = parse_words)]
+        s: Option<Words>,
+        /// The new past tense
+        #[arg(long, value_name = "WORDS", group = "changes", value_parser = parse_words)]
+        past: Option<Words>,
+        /// The new past participle
+        #[arg(long, value_name = "WORDS", group = "changes", value_parser = parse_words)]
+        pp: Option<Words>,
+        /// The new present participle
+        #[arg(long, value_name = "WORDS", group = "changes", value_parser = parse_words)]
+        ing: Option<Words>,
+        #[command(flatten)]
+        file: DictionaryFile,
+    },
+    /// Remove a behavior from a term
+    Remove {
+        /// The name of the term
+        term: String,
+        /// The verb of the behavior to remove
+        #[arg(value_parser = parse_words)]
+        verb: Words,
+        #[command(flatten)]
+        file: DictionaryFile,
+    },
+}
+
+fn parse_words(text: &str) -> Result<Words, String> {
+    Words::parse(text)
+}
+
+fn parse_term_name(name: &str) -> Result<String, String> {
+    validate_term_name(name).map(|()| name.to_owned())
+}
+
+fn parse_text(text: &str) -> Result<String, String> {
+    if text.trim().is_empty() {
+        Err("must not be empty".to_owned())
+    } else {
+        Ok(text.to_owned())
+    }
 }
 
 /// The adapters for the languages ubiqlint can check.
@@ -52,8 +232,269 @@ fn main() -> ExitCode {
         Command::Check { config, dictionary } => {
             check(&mut reporter, &config, dictionary.as_deref())
         }
+        Command::Term(command) => {
+            let (file, request) = term_request(command);
+            edit_dictionary(&mut reporter, &file.dictionary, &request);
+        }
+        Command::Behavior(command) => {
+            let (file, request) = behavior_request(command);
+            edit_dictionary(&mut reporter, &file.dictionary, &request);
+        }
     }
     reporter.finish()
+}
+
+/// An edit and how to describe it once done.
+struct EditRequest {
+    edit: Edit,
+    /// What the edit did, such as "added term `Shipment`".
+    done: String,
+    /// What the edit was about, for when there was nothing to change.
+    subject: String,
+}
+
+fn term_request(command: TermCommand) -> (DictionaryFile, EditRequest) {
+    match command {
+        TermCommand::Add {
+            name,
+            plural,
+            kind,
+            ja,
+            description,
+            file,
+        } => (
+            file,
+            EditRequest {
+                done: format!("added term `{name}`"),
+                subject: format!("term `{name}`"),
+                edit: Edit::AddTerm(NewTerm {
+                    name,
+                    plural,
+                    kind,
+                    ja,
+                    description,
+                }),
+            },
+        ),
+        TermCommand::Edit {
+            name,
+            new_name,
+            plural,
+            kind,
+            unset_kind,
+            ja,
+            unset_ja,
+            description,
+            unset_description,
+            file,
+        } => {
+            let change = |value: Option<String>, unset: bool| match value {
+                Some(value) => FieldChange::Set(value),
+                None if unset => FieldChange::Unset,
+                None => FieldChange::Keep,
+            };
+            let done = match &new_name {
+                Some(new_name) if *new_name != name => {
+                    format!("updated term `{name}` (renamed to `{new_name}`)")
+                }
+                _ => format!("updated term `{name}`"),
+            };
+            (
+                file,
+                EditRequest {
+                    done,
+                    subject: format!("term `{name}`"),
+                    edit: Edit::EditTerm {
+                        name,
+                        changes: TermChanges {
+                            name: new_name,
+                            plural,
+                            kind: change(kind, unset_kind),
+                            ja: change(ja, unset_ja),
+                            description: change(description, unset_description),
+                        },
+                    },
+                },
+            )
+        }
+        TermCommand::Remove { name, file } => (
+            file,
+            EditRequest {
+                done: format!("removed term `{name}`"),
+                subject: format!("term `{name}`"),
+                edit: Edit::RemoveTerm { name },
+            },
+        ),
+    }
+}
+
+fn behavior_request(command: BehaviorCommand) -> (DictionaryFile, EditRequest) {
+    match command {
+        BehaviorCommand::Add {
+            term,
+            verb,
+            s,
+            past,
+            pp,
+            ing,
+            file,
+        } => (
+            file,
+            EditRequest {
+                done: format!("added behavior `{verb}` to term `{term}`"),
+                subject: format!("behavior `{verb}` of term `{term}`"),
+                edit: Edit::AddBehavior {
+                    term,
+                    forms: VerbForms {
+                        base: verb,
+                        s,
+                        past,
+                        pp,
+                        ing,
+                    },
+                },
+            },
+        ),
+        BehaviorCommand::Edit {
+            term,
+            verb,
+            new_verb,
+            s,
+            past,
+            pp,
+            ing,
+            file,
+        } => {
+            let done = match &new_verb {
+                Some(new_verb) if *new_verb != verb => {
+                    format!("updated behavior `{verb}` of term `{term}` (renamed to `{new_verb}`)")
+                }
+                _ => format!("updated behavior `{verb}` of term `{term}`"),
+            };
+            (
+                file,
+                EditRequest {
+                    done,
+                    subject: format!("behavior `{verb}` of term `{term}`"),
+                    edit: Edit::EditBehavior {
+                        term,
+                        verb,
+                        changes: BehaviorChanges {
+                            verb: new_verb,
+                            s,
+                            past,
+                            pp,
+                            ing,
+                        },
+                    },
+                },
+            )
+        }
+        BehaviorCommand::Remove { term, verb, file } => (
+            file,
+            EditRequest {
+                done: format!("removed behavior `{verb}` from term `{term}`"),
+                subject: format!("behavior `{verb}` of term `{term}`"),
+                edit: Edit::RemoveBehavior { term, verb },
+            },
+        ),
+    }
+}
+
+/// Applies an edit to the dictionary at `path` and writes it back, or
+/// reports why it was refused, leaving the file as it was.
+fn edit_dictionary(reporter: &mut Reporter, path: &Path, request: &EditRequest) {
+    let Some(source) = read_file(reporter, path) else {
+        return;
+    };
+    match ubiqlint_core::edit::apply(&source, &request.edit) {
+        Ok(Outcome::Changed(text)) => match replace_file(path, &text) {
+            Ok(()) => {
+                reporter.line(&format!("{}: {}", path.display(), request.done));
+            }
+            Err(error) => reporter.problem(&format!(
+                "{}: error: cannot write the file: {error}",
+                path.display()
+            )),
+        },
+        Ok(Outcome::Unchanged) => {
+            reporter.line(&format!(
+                "{}: no changes: {} already has these values",
+                path.display(),
+                request.subject
+            ));
+        }
+        Err(EditError::InvalidDictionary(diagnostics)) => {
+            reporter.diagnostics(path, &diagnostics);
+            reporter.problem(&format!(
+                "{}: error: cannot edit an invalid dictionary; fix the problems above first",
+                path.display()
+            ));
+        }
+        Err(EditError::Rejected(problems)) => {
+            for problem in problems {
+                reporter.problem(&format!(
+                    "{}: error: {}",
+                    path.display(),
+                    single_line(&problem)
+                ));
+            }
+        }
+        Err(EditError::Layout(message)) => reporter.problem(&format!(
+            "{}: error: {}",
+            path.display(),
+            single_line(&message)
+        )),
+    }
+}
+
+/// Replaces the contents of the file at `path` all at once: the text is
+/// written to a temporary file next to it, which then takes its place. A
+/// failure midway leaves the old file untouched. A symlink keeps pointing
+/// to the same file, which keeps its permissions. If something already
+/// exists at the temporary path, nothing is written and it is left alone.
+fn replace_file(path: &Path, contents: &str) -> io::Result<()> {
+    let target = fs::canonicalize(path)?;
+    let permissions = fs::metadata(&target)?.permissions();
+    let temporary = temporary_path(&target)?;
+    // Create the file only if nothing is there: an existing path, perhaps
+    // a symlink to an unrelated file, must not be written through.
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)
+        .map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!(
+                    "cannot create the temporary file `{}`: {error}",
+                    temporary.display()
+                ),
+            )
+        })?;
+    let written = (|| {
+        file.write_all(contents.as_bytes())?;
+        file.set_permissions(permissions)?;
+        file.sync_all()?;
+        fs::rename(&temporary, &target)
+    })();
+    // Only the file created above is cleaned up.
+    if written.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    written
+}
+
+/// The temporary file `replace_file` writes before replacing `target`: a
+/// hidden file next to it, named after it and this process.
+fn temporary_path(target: &Path) -> io::Result<PathBuf> {
+    let name = target
+        .file_name()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "not a file"))?;
+    let mut temporary = std::ffi::OsString::from(".");
+    temporary.push(name);
+    temporary.push(format!(".ubiqlint-{}.tmp", std::process::id()));
+    Ok(target.with_file_name(temporary))
 }
 
 /// Prints problems to stdout, one per line. Rust ignores SIGPIPE, so a
@@ -495,4 +936,52 @@ fn single_line(text: &str) -> String {
         }
     }
     line
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A file already at the temporary path is neither written through
+    /// (it may be a symlink to an unrelated file) nor removed, and the
+    /// dictionary stays as it was.
+    #[test]
+    fn replace_file_leaves_an_existing_temporary_path_alone() {
+        let directory =
+            std::env::temp_dir().join(format!("ubiqlint-replace-file-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&directory);
+        fs::create_dir_all(&directory).unwrap();
+        let dictionary = directory.join("terms.yaml");
+        fs::write(&dictionary, "old").unwrap();
+        let temporary = temporary_path(&fs::canonicalize(&dictionary).unwrap()).unwrap();
+
+        fs::write(&temporary, "someone else's").unwrap();
+        assert!(replace_file(&dictionary, "new").is_err());
+        assert_eq!(fs::read_to_string(&temporary).unwrap(), "someone else's");
+        assert_eq!(fs::read_to_string(&dictionary).unwrap(), "old");
+
+        #[cfg(unix)]
+        {
+            let unrelated = directory.join("unrelated.txt");
+            fs::write(&unrelated, "unrelated").unwrap();
+            fs::remove_file(&temporary).unwrap();
+            std::os::unix::fs::symlink(&unrelated, &temporary).unwrap();
+            assert!(replace_file(&dictionary, "new").is_err());
+            assert_eq!(fs::read_to_string(&unrelated).unwrap(), "unrelated");
+            assert!(
+                fs::symlink_metadata(&temporary)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink()
+            );
+            assert!(
+                fs::symlink_metadata(&dictionary)
+                    .unwrap()
+                    .file_type()
+                    .is_file()
+            );
+            assert_eq!(fs::read_to_string(&dictionary).unwrap(), "old");
+        }
+        fs::remove_dir_all(&directory).unwrap();
+    }
 }
