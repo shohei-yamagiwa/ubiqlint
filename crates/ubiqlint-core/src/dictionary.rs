@@ -248,19 +248,34 @@ fn read_term(diags: &mut Diagnostics, node: &Node, seen: &mut Seen) -> Option<Te
     })
 }
 
-fn read_term_name<'a>(diags: &mut Diagnostics, node: &'a Node) -> Option<&'a str> {
-    let name = yaml::string(diags, node, "`name`")?;
+/// Checks that `name` can name a term: ASCII letters and digits, starting
+/// with a letter.
+///
+/// On failure, returns a message explaining the expected format.
+pub fn validate_term_name(name: &str) -> Result<(), String> {
     let mut chars = name.chars();
     let valid = chars.next().is_some_and(|c| c.is_ascii_alphabetic())
         && chars.all(|c| c.is_ascii_alphanumeric());
-    if !valid {
-        diags.error(
-            yaml::location(node),
-            format!(
-                "invalid term name `{name}`: use ASCII letters and digits, \
-                 starting with a letter (e.g. `LineItem`)"
-            ),
-        );
+    if valid {
+        Ok(())
+    } else {
+        Err(format!(
+            "invalid term name `{name}`: use ASCII letters and digits, \
+             starting with a letter (e.g. `LineItem`)"
+        ))
+    }
+}
+
+/// Returns the singular form a term named `name` must have: the words of
+/// its name, such as `line item` for `LineItem`.
+pub(crate) fn singular_of(name: &str) -> Result<Words, String> {
+    Words::parse(&identifier::split(name).join(" "))
+}
+
+fn read_term_name<'a>(diags: &mut Diagnostics, node: &'a Node) -> Option<&'a str> {
+    let name = yaml::string(diags, node, "`name`")?;
+    if let Err(message) = validate_term_name(name) {
+        diags.error(yaml::location(node), message);
         return None;
     }
     Some(name)
