@@ -17,11 +17,19 @@
 //! example, the parent of a lambda parameter is the method or variable whose
 //! body or initializer contains the lambda. Unnamed variables (`_`) and
 //! receiver parameters (`Order this`) are not symbols.
+//!
+//! As in the Java compiler, Unicode escapes are translated before parsing,
+//! so `class \u004frder` declares `Order`. Names are given as translated,
+//! while locations point into the source as written.
+
+mod lexical;
 
 use tree_sitter::{Node, Parser};
 use ubiqlint_core::{
-    Diagnostic, LanguageAdapter, LineIndex, Name, Span, SymbolId, SymbolKind, Symbols,
+    Diagnostic, LanguageAdapter, LineIndex, Location, Name, Span, SymbolId, SymbolKind, Symbols,
 };
+
+use crate::lexical::Translated;
 
 /// The adapter for Java source files (`.java`).
 #[derive(Clone, Copy, Debug, Default)]
@@ -44,21 +52,50 @@ pub fn extract(source: &str) -> Result<Symbols, Vec<Diagnostic>> {
     parser
         .set_language(&tree_sitter_java::LANGUAGE.into())
         .expect("the Java grammar is compatible with tree-sitter");
+    let source = Source {
+        translated: Translated::new(source),
+        lines: LineIndex::new(source),
+    };
     let tree = parser
-        .parse(source, None)
+        .parse(source.translated.text(), None)
         .expect("parsing without a timeout or cancellation always succeeds");
-    let lines = LineIndex::new(source);
     let root = tree.root_node();
     if root.has_error() {
-        return Err(syntax_errors(root, &lines));
+        return Err(syntax_errors(root, &source));
     }
     let mut extractor = Extractor {
         source,
-        lines,
         symbols: Symbols::new(),
     };
     extractor.walk(root);
     Ok(extractor.symbols)
+}
+
+/// A source file as the parser sees it, with a way back to the file as
+/// written.
+struct Source<'a> {
+    translated: Translated<'a>,
+    lines: LineIndex<'a>,
+}
+
+impl Source<'_> {
+    /// Returns the location in the file of an offset in the parsed text.
+    fn location(&self, offset: usize) -> Location {
+        self.lines.location(self.translated.original_offset(offset))
+    }
+
+    /// Returns the span in the file of a range in the parsed text.
+    fn span(&self, start: usize, end: usize) -> Span {
+        Span {
+            start: self.location(start),
+            end: self.location(end),
+        }
+    }
+
+    /// Returns the parsed text of `node`.
+    fn text(&self, node: Node) -> &str {
+        &self.translated.text()[node.byte_range()]
+    }
 }
 
 /// Reports each missing token and each innermost error in the tree.
@@ -66,7 +103,7 @@ pub fn extract(source: &str) -> Result<Symbols, Vec<Diagnostic>> {
 /// An error that contains other errors is not reported itself. When
 /// tree-sitter cannot recover, it may wrap everything from the start of the
 /// file in one error, and reporting that would hide where the problem is.
-fn syntax_errors(root: Node, lines: &LineIndex) -> Vec<Diagnostic> {
+fn syntax_errors(root: Node, source: &Source) -> Vec<Diagnostic> {
     let mut errors = Vec::new();
     let mut stack = vec![root];
     let mut cursor = root.walk();
@@ -88,14 +125,14 @@ fn syntax_errors(root: Node, lines: &LineIndex) -> Vec<Diagnostic> {
             continue;
         };
         errors.push(Diagnostic {
-            location: lines.location(node.start_byte()),
+            location: source.location(node.start_byte()),
             message,
         });
     }
     if errors.is_empty() {
         // Not expected, but a file must never fail without a reason.
         errors.push(Diagnostic {
-            location: lines.location(root.start_byte()),
+            location: source.location(root.start_byte()),
             message: "syntax error".to_owned(),
         });
     }
@@ -104,8 +141,7 @@ fn syntax_errors(root: Node, lines: &LineIndex) -> Vec<Diagnostic> {
 }
 
 struct Extractor<'a> {
-    source: &'a str,
-    lines: LineIndex<'a>,
+    source: Source<'a>,
     symbols: Symbols,
 }
 
@@ -244,7 +280,7 @@ impl Extractor<'_> {
             return;
         };
         let end = node.child_by_field_name("dimensions").unwrap_or(name);
-        let span = self.lines.span(start.start_byte(), end.end_byte());
+        let span = self.source.span(start.start_byte(), end.end_byte());
         self.declare_as(kind, Some(name), span, parent);
     }
 
@@ -259,7 +295,7 @@ impl Extractor<'_> {
         parent: Option<SymbolId>,
     ) -> Option<SymbolId> {
         let name = name.filter(|name| name.kind() == "identifier")?;
-        let text = &self.source[name.byte_range()];
+        let text = self.source.text(name);
         if text == "_" {
             return None;
         }
@@ -271,7 +307,7 @@ impl Extractor<'_> {
     }
 
     fn span(&self, node: Node) -> Span {
-        self.lines.span(node.start_byte(), node.end_byte())
+        self.source.span(node.start_byte(), node.end_byte())
     }
 }
 

@@ -566,6 +566,42 @@ fn handles_deeply_nested_expressions() {
 }
 
 #[test]
+fn ends_line_comments_at_lone_carriage_returns() {
+    // Java accepts `\r` alone as a line terminator.
+    let source = "// comment\rclass CRComment { int total; }";
+    assert_eq!(outline(source), lines("type CRComment\n  field total"));
+    let symbols = symbols(source);
+    let name = find(&symbols, "CRComment").name.as_ref().unwrap();
+    assert_eq!(name.span, span((2, 7), (2, 16)));
+}
+
+#[test]
+fn translates_unicode_escapes_before_parsing() {
+    // `\u000a` is a line terminator, so it ends the comment.
+    let source = r"// comment\u000aclass UnicodeNewline { int total; }";
+    assert_eq!(outline(source), lines("type UnicodeNewline\n  field total"));
+
+    // Names are translated, while spans point into the source as written.
+    let source = r"class \u004frder { int \u0074otal; }";
+    assert_eq!(outline(source), lines("type Order\n  field total"));
+    let symbols = symbols(source);
+    assert_eq!(
+        find(&symbols, "Order").name.as_ref().unwrap().span,
+        span((1, 7), (1, 17))
+    );
+    let total = find(&symbols, "total");
+    assert_eq!(total.name.as_ref().unwrap().span, span((1, 24), (1, 34)));
+    assert_eq!(total.span, span((1, 20), (1, 35)));
+}
+
+#[test]
+fn locates_syntax_errors_after_unicode_escapes() {
+    let errors = extract(r"class \u004frder { int total }").unwrap_err();
+    let errors: Vec<String> = errors.iter().map(ToString::to_string).collect();
+    assert_eq!(errors, ["1:29: syntax error: missing `;`"]);
+}
+
+#[test]
 fn reports_syntax_errors_instead_of_symbols() {
     let source =
         "class Order {\n    void place() {\n        int count = 0\n    }\n    void cancel( {}\n}\n";
