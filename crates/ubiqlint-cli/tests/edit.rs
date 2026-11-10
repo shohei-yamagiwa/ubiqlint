@@ -66,6 +66,137 @@ fn stderr(output: &Output) -> String {
 }
 
 #[test]
+fn initializes_a_dictionary_and_then_adds_a_term() {
+    let project = Project::new();
+    fs::create_dir_all(project.0.join("src/order")).unwrap();
+    let output = project.run(&[
+        "dictionary",
+        "init",
+        "--dictionary",
+        "src/order/terms.yaml",
+        "--context",
+        "order",
+    ]);
+    assert!(output.status.success(), "{}", stdout(&output));
+    assert_eq!(
+        stdout(&output),
+        "src/order/terms.yaml: created dictionary\n"
+    );
+    assert!(output.stderr.is_empty());
+    assert_eq!(
+        project.read("src/order/terms.yaml"),
+        "context: order\nterms: []\n"
+    );
+    assert!(
+        project
+            .run(&["validate", "src/order/terms.yaml"])
+            .status
+            .success()
+    );
+    let output = project.run(&[
+        "term",
+        "add",
+        "Order",
+        "--plural",
+        "orders",
+        "--dictionary",
+        "src/order/terms.yaml",
+    ]);
+    assert!(output.status.success(), "{}", stdout(&output));
+    assert!(project.read("src/order/terms.yaml").contains("name: Order"));
+    assert_eq!(project.read("terms.yaml"), ORDER);
+}
+
+#[test]
+fn dictionary_init_defaults_to_terms_yaml_and_escapes_the_context() {
+    let project = Project::new();
+    fs::remove_file(project.0.join("terms.yaml")).unwrap();
+    let context = "注文: \"受付\"\nterms: []";
+    let output = project.run(&["dictionary", "init", "--context", context]);
+    assert!(output.status.success(), "{}", stdout(&output));
+    let dictionary = ubiqlint_core::Dictionary::from_yaml_str(&project.read("terms.yaml")).unwrap();
+    assert_eq!(dictionary.context, context);
+    assert!(dictionary.terms.is_empty());
+}
+
+#[test]
+fn dictionary_init_requires_an_explicit_non_empty_context() {
+    let project = Project::new();
+    fs::remove_file(project.0.join("terms.yaml")).unwrap();
+    for args in [
+        vec!["dictionary", "init"],
+        vec!["dictionary", "init", "--context", ""],
+        vec!["dictionary", "init", "--context", " \t"],
+    ] {
+        let output = project.run(&args);
+        assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+        assert!(!project.0.join("terms.yaml").exists());
+    }
+}
+
+#[test]
+fn dictionary_init_never_overwrites_existing_paths_or_creates_parent_directories() {
+    let project = Project::new();
+    for source in [ORDER, "invalid dictionary\n", ""] {
+        project.write("terms.yaml", source);
+        let output = project.run(&["dictionary", "init", "--context", "other"]);
+        assert_eq!(output.status.code(), Some(1));
+        assert!(stdout(&output).starts_with("terms.yaml: error: cannot create the dictionary:"));
+        assert_eq!(project.read("terms.yaml"), source);
+    }
+    fs::create_dir_all(project.0.join("directory/terms.yaml")).unwrap();
+    for dictionary in ["directory/terms.yaml", "missing/terms.yaml"] {
+        let output = project.run(&[
+            "dictionary",
+            "init",
+            "--dictionary",
+            dictionary,
+            "--context",
+            "other",
+        ]);
+        assert_eq!(output.status.code(), Some(1));
+    }
+    assert!(project.0.join("directory/terms.yaml").is_dir());
+    assert!(!project.0.join("missing").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn dictionary_init_refuses_existing_and_dangling_symlinks() {
+    use std::os::unix::fs::symlink;
+
+    let project = Project::new();
+    fs::create_dir_all(project.0.join("linked")).unwrap();
+    let dictionary = project.0.join("linked/terms.yaml");
+    for target in ["../terms.yaml", "../missing.yaml"] {
+        symlink(target, &dictionary).unwrap();
+        let output = project.run(&[
+            "dictionary",
+            "init",
+            "--dictionary",
+            "linked/terms.yaml",
+            "--context",
+            "other",
+        ]);
+        assert_eq!(output.status.code(), Some(1));
+        assert_eq!(fs::read_link(&dictionary).unwrap(), PathBuf::from(target));
+        assert_eq!(project.read("terms.yaml"), ORDER);
+        assert!(!project.0.join("missing.yaml").exists());
+        fs::remove_file(&dictionary).unwrap();
+    }
+}
+
+#[test]
+fn term_add_still_requires_an_existing_dictionary() {
+    let project = Project::new();
+    fs::remove_file(project.0.join("terms.yaml")).unwrap();
+    let output = project.run(&["term", "add", "Order", "--plural", "orders"]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(stdout(&output).starts_with("terms.yaml: error: cannot read the file:"));
+    assert!(!project.0.join("terms.yaml").exists());
+}
+
+#[test]
 fn adds_a_term_and_keeps_the_rest_of_the_file() {
     let project = Project::new();
     let output = project.run(&[

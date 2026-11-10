@@ -57,6 +57,7 @@ claude mcp add ubiqlint -- ubiqlint mcp
 | `get_context` | 新しい型やメソッドに名前を付ける前。ファイルのパス（まだ存在しなくてよい）を渡すと、適用される命名ルール・インポートルール・語彙と、辞書（最も近い `terms.yaml`）の内容をそのまま返す |
 | `check_code` | ファイルに書き込む前。下書きの全文を、そのパスに置いたものとして検査する |
 | `check_files` | ファイルを編集した後。指定したファイルやディレクトリ、または全体を、CI の `ubiqlint check` と同じように検査する。既定では違反を 100 件まで返す |
+| `create_dictionary` | 新しいコンテキストの空の辞書を作成する。`ubiqlint dictionary init` と同じ。保存先 `dictionary` とコンテキスト名 `context` を明示する |
 | `add_term`・`edit_term`・`remove_term` | 用語を追加・編集・削除する。`ubiqlint term` と同じ |
 | `add_behavior`・`edit_behavior`・`remove_behavior` | 振る舞いを追加・編集・削除する。`ubiqlint behavior` と同じ |
 
@@ -70,6 +71,34 @@ src/main/java/com/example/order/domain/Order.java:7:17: error: `updateOrder` doe
 `exclude` に一致するファイルや、どのルールも適用されないファイルは「検査しなかった」と理由付きで返ります。違反がないこととは区別され、`check_files` の最後の件数にも含まれません。ルートの辞書が不正な場合は、CI と同じく、どのファイルを検査するときにも問題として返ります。パスが範囲外の場合、設定ファイルや辞書が不正な場合、編集が拒否された場合は、ツールの結果がエラー（`isError`）になり、理由がすべて本文に書かれます。
 
 辞書の編集ツールは、語形を推測しません。複数形や動詞の活用形はすべて引数で渡します。編集した辞書は書き込む前に検証され、コメントや書式は変更した行以外そのまま残ります。
+
+### 新しい辞書を作成する
+
+MCP の `create_dictionary` に、次の引数を渡します。
+
+```json
+{"dictionary": "src/order/terms.yaml", "context": "order"}
+```
+
+CLI では次のコマンドを使います。
+
+```sh
+ubiqlint dictionary init --dictionary src/order/terms.yaml --context order
+```
+
+どちらも次の空の辞書を生成します。その後は `add_term`（CLI では `ubiqlint term add`）で用語を追加できます。
+
+```yaml
+context: order
+terms: []
+```
+
+- `context` は空白だけでない文字列を必ず指定します。パスからは推測しません
+- CLI の `--dictionary` を省略すると、カレントディレクトリの `terms.yaml` に作成します。MCP ではプロジェクト内の `terms.yaml` のパスを指定します
+- 保存先の親ディレクトリは事前に用意します。既存ファイル・ディレクトリ・シンボリックリンクは上書きせず、エラーにします
+- 辞書作成に有効な `ubiqlint.yaml` は不要です。MCP では設定ファイルのディレクトリ内に作成します
+- **空の辞書でも、その配下では親の辞書が適用されなくなります。** 辞書はマージされず、最も近いものだけが使われます。作成は新しいコンテキストを設ける操作として扱います
+- `add_term` は既存の有効な辞書を必要とします。辞書がなければ、自動作成せずエラーにします
 
 ## 3. Claude Code の権限設定
 

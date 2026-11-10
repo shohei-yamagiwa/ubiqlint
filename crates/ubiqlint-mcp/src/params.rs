@@ -35,6 +35,18 @@ pub struct CheckFilesParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+pub struct CreateDictionaryParams {
+    /// Where to create `terms.yaml`, relative to the configuration directory
+    /// or absolute, within the project. Its parent directory must exist.
+    /// An existing path is never overwritten.
+    pub dictionary: String,
+    /// The non-empty name of the new bounded context. It is never inferred
+    /// from the path.
+    pub context: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct AddTermParams {
     /// The dictionary to edit: an existing `terms.yaml`, relative to the
     /// configuration directory or absolute.

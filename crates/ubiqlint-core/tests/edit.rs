@@ -29,6 +29,37 @@ fn words(text: &str) -> Words {
     Words::parse(text).unwrap()
 }
 
+#[test]
+fn creates_an_empty_dictionary_preserving_the_context_as_a_string() {
+    assert_eq!(
+        edit::create("order").unwrap(),
+        "context: order\nterms: []\n"
+    );
+    for context in [
+        "注文",
+        "null",
+        "true",
+        "123",
+        "sales: order # context",
+        "[order, billing]",
+        "*alias",
+        " leading and trailing ",
+        "line\nbreak\r\t\"\\\0\u{2028}\u{2029}",
+        "order\nterms: []\n---\ncontext: other",
+    ] {
+        let source = edit::create(context).unwrap();
+        assert_eq!(source.lines().count(), 2, "{source:?}");
+        let dictionary = Dictionary::from_yaml_str(&source).unwrap();
+        assert_eq!(dictionary.context, context);
+        assert!(dictionary.terms.is_empty());
+    }
+    for context in ["", " \t\n", "\u{3000}"] {
+        let found = edit::create(context).unwrap_err();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].message, "`context` must not be empty");
+    }
+}
+
 fn verb_forms(base: &str, s: &str, past: &str, pp: &str, ing: &str) -> VerbForms {
     VerbForms {
         base: words(base),

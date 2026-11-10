@@ -13,10 +13,23 @@ use ubiqlint_core::{
 use ubiqlint_project::report;
 
 use crate::params::{
-    AddBehaviorParams, AddTermParams, EditBehaviorParams, EditTermParams, RemoveBehaviorParams,
-    RemoveTermParams,
+    AddBehaviorParams, AddTermParams, CreateDictionaryParams, EditBehaviorParams, EditTermParams,
+    RemoveBehaviorParams, RemoveTermParams,
 };
 use crate::{Server, failure, outside, success};
+
+pub(crate) fn create_dictionary(server: &Server, params: CreateDictionaryParams) -> CallToolResult {
+    let path = match dictionary_path(server, &params.dictionary) {
+        Ok(path) => path,
+        Err(result) => return result,
+    };
+    let _edit = server.edits.lock().unwrap_or_else(PoisonError::into_inner);
+    let result = ubiqlint_project::create_dictionary(&path, &params.context);
+    match report::create_result(&path, &result) {
+        Ok(done) => success(done),
+        Err(problems) => failure(problems.join("\n")),
+    }
+}
 
 pub(crate) fn add_term(server: &Server, params: AddTermParams) -> CallToolResult {
     let mut arguments = Arguments::default();
