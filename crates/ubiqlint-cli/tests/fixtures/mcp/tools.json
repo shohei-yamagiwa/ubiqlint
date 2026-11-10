@@ -173,6 +173,36 @@
   },
   {
     "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": false,
+      "title": "Create a dictionary for a new context"
+    },
+    "description": "Creates an empty dictionary for a new bounded context, as `ubiqlint dictionary init`\ndoes. Never overwrites an existing path. Even an empty dictionary replaces the ancestor\ndictionary for files below it; terms are never inherited.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "context": {
+          "description": "The non-empty name of the new bounded context. It is never inferred\nfrom the path.",
+          "type": "string"
+        },
+        "dictionary": {
+          "description": "Where to create `terms.yaml`, relative to the configuration directory\nor absolute, within the project. Its parent directory must exist.\nAn existing path is never overwritten.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "dictionary",
+        "context"
+      ],
+      "type": "object"
+    },
+    "name": "create_dictionary"
+  },
+  {
+    "annotations": {
       "destructiveHint": true,
       "idempotentHint": true,
       "openWorldHint": false,

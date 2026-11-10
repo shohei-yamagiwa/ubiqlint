@@ -44,6 +44,9 @@ enum Command {
         #[arg(value_name = "PATHS")]
         paths: Vec<PathBuf>,
     },
+    /// Create a dictionary for a new bounded context
+    #[command(subcommand)]
+    Dictionary(DictionaryCommand),
     /// Add, edit or remove a term of a dictionary
     #[command(subcommand)]
     Term(TermCommand),
@@ -64,6 +67,21 @@ enum Command {
         /// workspace root (or the working directory if no root is supplied)
         #[arg(long)]
         config: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+enum DictionaryCommand {
+    /// Create an empty dictionary. Even when empty, it replaces the ancestor
+    /// dictionary for files below it; terms are never inherited
+    Init {
+        /// Where to create the dictionary. The parent directory must exist;
+        /// an existing path is never overwritten
+        #[arg(long, value_name = "PATH", default_value = DICTIONARY_FILE_NAME)]
+        dictionary: PathBuf,
+        /// The name of the new bounded context (never inferred from the path)
+        #[arg(long, value_name = "TEXT", value_parser = parse_text)]
+        context: String,
     },
 }
 
@@ -271,6 +289,18 @@ fn main() -> ExitCode {
             dictionary,
             paths,
         } => check(&mut reporter, &config, dictionary.as_deref(), &paths),
+        Command::Dictionary(DictionaryCommand::Init {
+            dictionary,
+            context,
+        }) => {
+            let result = ubiqlint_project::create_dictionary(&dictionary, &context);
+            match report::create_result(&dictionary, &result) {
+                Ok(done) => {
+                    reporter.line(&done);
+                }
+                Err(problems) => reporter.problems(problems),
+            }
+        }
         Command::Term(command) => {
             let (file, edit) = term_edit(command);
             edit_dictionary(&mut reporter, &file.dictionary, &edit);

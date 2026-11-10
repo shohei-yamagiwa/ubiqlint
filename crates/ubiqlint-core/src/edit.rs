@@ -110,6 +110,14 @@ pub enum EditError {
     Layout(String),
 }
 
+/// Creates the text of an empty dictionary for the explicitly named context.
+/// The context is escaped as YAML and validated before any file is written.
+pub fn create(context: &str) -> Result<String, Vec<Diagnostic>> {
+    let source = format!("context: {}\nterms: []\n", layout::scalar(context));
+    Dictionary::from_yaml_str(&source)?;
+    Ok(source)
+}
+
 /// Applies `edit` to `source`, the text of a dictionary.
 pub fn apply(source: &str, edit: &Edit) -> Result<Outcome, EditError> {
     let current = Dictionary::from_yaml_str(source).map_err(EditError::InvalidDictionary)?;

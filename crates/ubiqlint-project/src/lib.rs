@@ -30,7 +30,9 @@ use ubiqlint_java::JavaAdapter;
 
 pub use select::Selection;
 pub use walk::{Walk, WalkError};
-pub use write::{EditFileError, EditOutcome, edit_dictionary, replace_file};
+pub use write::{
+    CreateFileError, EditFileError, EditOutcome, create_dictionary, edit_dictionary, replace_file,
+};
 
 /// The adapters for the languages ubiqlint can check.
 const ADAPTERS: [&dyn LanguageAdapter; 1] = [&JavaAdapter];

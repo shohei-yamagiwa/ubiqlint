@@ -699,7 +699,7 @@ fn unexpected(what: &str) -> String {
 
 /// Renders `text` as a YAML scalar that reads back as the same string in
 /// both block and flow context: as is when that is safe, or double-quoted.
-fn scalar(text: &str) -> String {
+pub(super) fn scalar(text: &str) -> String {
     if reads_as_itself(&format!("key: {text}"), text)
         && reads_as_itself(&format!("{{key: {text}}}"), text)
     {

@@ -16,6 +16,7 @@ A universal linter for a ubiquitous language
 - 型・メソッド・フィールド・引数・ローカル変数の名前を、辞書とパターンに照らして検査する
 - ソースに最も近い `terms.yaml` を使い、ディレクトリごとに辞書を分ける
 - 辞書の用語と衝突する外部型のインポートなど、設定したインポート境界の違反を検出する
+- CLI・MCP から新しいコンテキストの空の辞書を作成する
 - CLI から辞書の用語・振る舞いを追加・編集・削除する
 - MCP から辞書の取得・編集とコードの検査を行う
 - 診断専用の LSP から、未保存の Java バッファを検査する
@@ -119,10 +120,22 @@ ubiqlint check                         # 設定配下を検査
 ubiqlint check src/Order.java          # 指定したファイルだけ検査
 ubiqlint check --config path/to/ubiqlint.yaml
 ubiqlint validate ubiqlint.yaml terms.yaml
+ubiqlint dictionary init --context order  # 空の辞書を新規作成
 ubiqlint term --help                   # 用語の追加・編集・削除
 ubiqlint behavior --help               # 振る舞いの追加・編集・削除
 ubiqlint --help
 ```
+
+新しいコンテキストの辞書を作成する場合は、保存先とコンテキスト名を指定します。
+
+```sh
+ubiqlint dictionary init --dictionary src/order/terms.yaml --context order
+```
+
+保存先の親ディレクトリは事前に用意します。既存のパスは上書きしません。
+`--dictionary` の既定値は `terms.yaml` で、`--context` は必須です。
+空の辞書でも、その配下では親の辞書が適用されなくなります。
+作成後は `ubiqlint term add` で用語を追加できます。
 
 既定の設定はカレントディレクトリの `ubiqlint.yaml` です。検査対象は設定ファイルの
 ディレクトリ以下で、各ソースから上にたどって最初に見つかる `terms.yaml` を使います。

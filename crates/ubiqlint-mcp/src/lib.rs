@@ -28,7 +28,8 @@ use ubiqlint_project::{Project, report};
 
 use crate::params::{
     AddBehaviorParams, AddTermParams, CheckCodeParams, CheckFilesParams, ContextParams,
-    EditBehaviorParams, EditTermParams, RemoveBehaviorParams, RemoveTermParams,
+    CreateDictionaryParams, EditBehaviorParams, EditTermParams, RemoveBehaviorParams,
+    RemoveTermParams,
 };
 
 /// Serves the project of the configuration file at `config_path` over
@@ -100,6 +101,9 @@ make a violation go away: add one only when it belongs to the domain's ubiquitou
 Changes to dictionaries are reviewed.
 - Never edit `terms.yaml` directly. Use `add_term`, `edit_term`, `remove_term`, `add_behavior`, \
 `edit_behavior` and `remove_behavior`, which check the dictionary before writing it.
+- To create a dictionary for a new bounded context, use `create_dictionary` with an explicit \
+context name. Even an empty dictionary replaces the ancestor dictionary for files below it; \
+terms are never inherited.
 
 Paths are relative to the configuration directory, or absolute.";
 
@@ -165,6 +169,26 @@ impl Server {
         Parameters(params): Parameters<CheckFilesParams>,
     ) -> CallToolResult {
         check::check_files(&self.config, &params)
+    }
+
+    /// Creates an empty dictionary for a new bounded context, as `ubiqlint dictionary init`
+    /// does. Never overwrites an existing path. Even an empty dictionary replaces the ancestor
+    /// dictionary for files below it; terms are never inherited.
+    #[tool(
+        name = "create_dictionary",
+        annotations(
+            title = "Create a dictionary for a new context",
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn create_dictionary(
+        &self,
+        Parameters(params): Parameters<CreateDictionaryParams>,
+    ) -> CallToolResult {
+        edit::create_dictionary(self, params)
     }
 
     /// Adds a term, without behaviors, to a dictionary. Every form is given: ubiqlint never

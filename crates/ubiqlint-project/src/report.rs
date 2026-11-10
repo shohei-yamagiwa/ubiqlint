@@ -12,7 +12,7 @@ use std::path::Path;
 use ubiqlint_core::edit::{Edit, EditError};
 use ubiqlint_core::{Diagnostic, ResolutionError};
 
-use crate::{EditFileError, EditOutcome, LoadError, Project, Skip, WalkError};
+use crate::{CreateFileError, EditFileError, EditOutcome, LoadError, Project, Skip, WalkError};
 
 /// Escapes control characters other than tabs, so that each problem stays
 /// on one line even when it quotes a value containing a line break.
@@ -111,6 +111,21 @@ impl Skip {
             Skip::Excluded => "it matches `exclude` in the configuration",
             Skip::UnsupportedLanguage => "ubiqlint cannot check this kind of file",
         }
+    }
+}
+
+/// The result of creating a new dictionary, shared by the CLI and MCP.
+pub fn create_result(
+    path: &Path,
+    result: &Result<(), CreateFileError>,
+) -> Result<String, Vec<String>> {
+    match result {
+        Ok(()) => Ok(format!("{}: created dictionary", path.display())),
+        Err(CreateFileError::Invalid(found)) => Err(diagnostics(path, found)),
+        Err(CreateFileError::Write(error)) => Err(vec![problem(
+            path,
+            &format!("cannot create the dictionary: {error}"),
+        )]),
     }
 }
 

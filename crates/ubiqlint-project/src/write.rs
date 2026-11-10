@@ -4,7 +4,37 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
+use ubiqlint_core::Diagnostic;
 use ubiqlint_core::edit::{self, Edit, EditError, Outcome};
+
+/// Why [`create_dictionary`] could not create a new dictionary.
+#[derive(Debug)]
+pub enum CreateFileError {
+    /// The new dictionary would be invalid.
+    Invalid(Vec<Diagnostic>),
+    /// The file could not be created or written, including an existing path.
+    Write(io::Error),
+}
+
+/// Creates an empty dictionary for `context`. The parent directory must
+/// exist. An existing path, including a symlink, is never overwritten.
+pub fn create_dictionary(path: &Path, context: &str) -> Result<(), CreateFileError> {
+    let source = edit::create(context).map_err(CreateFileError::Invalid)?;
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(CreateFileError::Write)?;
+    let written = file
+        .write_all(source.as_bytes())
+        .and_then(|()| file.sync_all());
+    // Remove only the file we created if writing fails.
+    if written.is_err() {
+        drop(file);
+        let _ = fs::remove_file(path);
+    }
+    written.map_err(CreateFileError::Write)
+}
 
 /// What [`edit_dictionary`] did to the file.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

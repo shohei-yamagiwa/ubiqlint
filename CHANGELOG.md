@@ -11,6 +11,8 @@
 - `ubiqlint check`: 識別子の命名とインポート境界の検査。ファイル・ディレクトリの指定と、
   ソースに最も近い辞書の解決に対応する。
 - `ubiqlint validate`: `ubiqlint.yaml` と `terms.yaml` の検証。
+- `ubiqlint dictionary init`・MCP の `create_dictionary`: 既存のパスを上書きせず、
+  明示したコンテキスト名で空の辞書を作成。
 - `ubiqlint term`・`ubiqlint behavior`: 辞書の用語と振る舞いの追加・編集・削除。
 - `ubiqlint mcp`: 辞書の取得・編集とコード検査を提供する stdio MCP サーバ。
 - `ubiqlint lsp`: 未保存の Java バッファを検査し、辞書・設定の変更で再検査する

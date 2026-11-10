@@ -173,7 +173,7 @@ fn serves_clients_with_an_initialize_handshake() {
     server.send(&json!({"jsonrpc": "2.0", "method": "notifications/initialized"}));
 
     let response = server.request("tools/list", json!({}));
-    assert_eq!(response["result"]["tools"].as_array().unwrap().len(), 9);
+    assert_eq!(response["result"]["tools"].as_array().unwrap().len(), 10);
 }
 
 #[test]
@@ -221,6 +221,7 @@ fn lists_the_tools_as_recorded() {
             "add_term",
             "check_code",
             "check_files",
+            "create_dictionary",
             "edit_behavior",
             "edit_term",
             "get_context",
@@ -231,6 +232,111 @@ fn lists_the_tools_as_recorded() {
     for tool in response["result"]["tools"].as_array().unwrap() {
         assert_eq!(tool["annotations"]["openWorldHint"], false, "{tool}");
     }
+}
+
+#[test]
+fn creates_a_dictionary_then_uses_it_instead_of_the_parent() {
+    let project = TempProject::copy("../../examples/order-service");
+    let mut server = Server::start(&project.config());
+    let dictionary = "src/main/java/com/example/order/domain/terms.yaml";
+    let source = "src/main/java/com/example/order/domain/Shipment.java";
+    let (error, text) = server.call(
+        "create_dictionary",
+        json!({"dictionary": dictionary, "context": "shipping"}),
+    );
+    assert!(!error, "{text}");
+    assert_eq!(text, format!("{dictionary}: created dictionary"));
+    assert_eq!(project.read(dictionary), "context: shipping\nterms: []\n");
+
+    let (error, text) = server.call("get_context", json!({"path": source}));
+    assert!(!error, "{text}");
+    assert!(
+        text.contains(&format!("Its dictionary is `{dictionary}`:")),
+        "{text}"
+    );
+    assert!(text.contains("terms: []"), "{text}");
+    assert!(!text.contains("name: Order"), "{text}");
+
+    let (error, text) = server.call(
+        "add_term",
+        json!({"dictionary": dictionary, "name": "Shipment", "plural": "shipments"}),
+    );
+    assert!(!error, "{text}");
+    let (error, text) = server.call(
+        "check_code",
+        json!({"path": source, "content": "class Shipment {}"}),
+    );
+    assert!(!error, "{text}");
+    assert!(project.read(dictionary).contains("name: Shipment"));
+}
+
+#[test]
+fn create_dictionary_rejects_invalid_arguments_paths_and_existing_files() {
+    let project = TempProject::copy("../../examples/order-service");
+    let before = project.read(ORDER_TERMS);
+    let mut server = Server::start(&project.config());
+    for (dictionary, context, expected) in [
+        ("terms.yaml", " \n", "`context` must not be empty"),
+        (
+            "../terms.yaml",
+            "outside",
+            "not under the configuration directory",
+        ),
+        (
+            "/etc/terms.yaml",
+            "outside",
+            "not under the configuration directory",
+        ),
+        ("ubiqlint.yaml", "wrong", "not a dictionary"),
+        (ORDER_TERMS, "other", "cannot create the dictionary"),
+        (
+            "missing/terms.yaml",
+            "missing",
+            "cannot create the dictionary",
+        ),
+    ] {
+        let (error, text) = server.call(
+            "create_dictionary",
+            json!({"dictionary": dictionary, "context": context}),
+        );
+        assert!(error, "{text}");
+        assert!(text.contains(expected), "{text}");
+    }
+    for arguments in [
+        json!({"dictionary": "terms.yaml"}),
+        json!({"context": "order"}),
+        json!({"dictionary": "terms.yaml", "context": "order", "force": true}),
+    ] {
+        let response = server.modern(
+            "tools/call",
+            json!({"name": "create_dictionary", "arguments": arguments}),
+        );
+        assert!(
+            response.get("error").is_some() || response["result"]["isError"] == json!(true),
+            "{response}"
+        );
+    }
+    assert_eq!(project.read(ORDER_TERMS), before);
+    assert!(!project.0.join("terms.yaml").exists());
+    assert!(!project.0.join("missing").exists());
+}
+
+#[test]
+fn create_dictionary_works_without_a_configuration_and_preserves_an_existing_dictionary() {
+    let project = TempProject::copy("../../examples/order-service");
+    fs::remove_file(project.0.join("ubiqlint.yaml")).unwrap();
+    let mut server = Server::start(&project.config());
+    let context = "注文: \"受付\"\nterms: []";
+    let arguments = json!({"dictionary": "terms.yaml", "context": context});
+    let (error, text) = server.call("create_dictionary", arguments.clone());
+    assert!(!error, "{text}");
+    let before = project.read("terms.yaml");
+    let dictionary = ubiqlint_core::Dictionary::from_yaml_str(&before).unwrap();
+    assert_eq!(dictionary.context, context);
+    assert!(dictionary.terms.is_empty());
+    let (error, text) = server.call("create_dictionary", arguments);
+    assert!(error, "{text}");
+    assert_eq!(project.read("terms.yaml"), before);
 }
 
 #[test]
